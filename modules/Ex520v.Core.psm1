@@ -684,6 +684,123 @@ function Find-Ex520vBackup {
     return $null
 }
 
+
+# Kimlik doğrulaması için yalnızca misc_ro okunur; cihaza veri yazılmaz.
+# Stok BusyBox sürümlerinde sha256sum bulunmayabileceğinden hash Windows'ta
+# hesaplanır. Böylece stok ve OpenWrt için aynı okuma yöntemi kullanılır.
+function Get-Ex520vLiveMiscRoIdentity {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)]$LiveState)
+
+    if (-not $LiveState.RootSsh -or $LiveState.Model -ne $script:SupportedModel -or -not $LiveState.Profile) {
+        throw 'misc_ro kimliği için doğrulanmış EX520v root SSH bağlantısı gerekiyor.'
+    }
+    $mtdText = Invoke-Ex520vSsh -Profile $LiveState.Profile -DeviceIp $LiveState.DeviceIp -RemoteCommand 'cat /proc/mtd'
+    $matchesFound = @()
+    foreach ($line in ($mtdText -split '\r?\n')) {
+        if ($line -match '^(mtd[0-9]+):\s+([0-9a-fA-F]+)\s+[0-9a-fA-F]+\s+"misc_ro"\s*$') {
+            $matchesFound += [pscustomobject]@{
+                Device = $Matches[1]
+                SizeBytes = [Convert]::ToInt64($Matches[2], 16)
+            }
+        }
+    }
+    if ($matchesFound.Count -ne 1 -or $matchesFound[0].SizeBytes -le 0) {
+        throw 'Canlı cihazda misc_ro bölümü tekil ve geçerli olarak bulunamadı.'
+    }
+
+    $tempFile = [IO.Path]::GetTempFileName()
+    try {
+        $remoteDevice = '/dev/' + $matchesFound[0].Device
+        Invoke-Ex520vSshToFile -Profile $LiveState.Profile -DeviceIp $LiveState.DeviceIp -RemoteCommand ('cat ' + $remoteDevice) -OutputPath $tempFile -TimeoutSeconds 180
+        $actualSize = (Get-Item -LiteralPath $tempFile).Length
+        if ($actualSize -ne $matchesFound[0].SizeBytes) {
+            throw ('Canlı misc_ro okuma boyutu yanlış: {0} != {1}' -f $actualSize, $matchesFound[0].SizeBytes)
+        }
+        [pscustomobject]@{
+            Sha256 = (Get-FileHash -LiteralPath $tempFile -Algorithm SHA256).Hash.ToLowerInvariant()
+            SizeBytes = [long]$actualSize
+        }
+    }
+    finally {
+        Remove-Item -LiteralPath $tempFile -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Get-Ex520vLiveMiscRoSha256 {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)]$LiveState)
+    (Get-Ex520vLiveMiscRoIdentity -LiveState $LiveState).Sha256
+}
+
+# Yedek dosyasının hash'i hem backup.json hem SHA256SUMS hem canlı
+# bölümle eşit olmalı. Tek başına JSON'a yazılan değer kabul edilmez.
+function Test-Ex520vBackupMatchesIdentity {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)]$Identity
+    )
+
+    if (-not (Test-Ex520vBackupDirectory -Path $Path)) { return $false }
+    try {
+        $metadata = Get-Content -LiteralPath (Join-Path $Path 'backup.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($metadata.model -ne $script:SupportedModel -or $metadata.system -ne 'Stok') { return $false }
+
+        $property = $metadata.PSObject.Properties['misc_ro_sha256']
+        if ($null -eq $property) { return $false }
+        $storedHash = [string]$property.Value
+        if ($storedHash -notmatch '^[a-fA-F0-9]{64}$') { return $false }
+        if ([string]$Identity.Sha256 -notmatch '^[a-fA-F0-9]{64}$' -or [long]$Identity.SizeBytes -le 0) { return $false }
+        if ($storedHash -ne [string]$Identity.Sha256) { return $false }
+
+        $miscFiles = @(Get-ChildItem -LiteralPath $Path -Filter 'mtd*-misc_ro.bin' -File)
+        if ($miscFiles.Count -ne 1) { return $false }
+        if ($miscFiles[0].Name -notmatch '^mtd[0-9]+-misc_ro\.bin$') { return $false }
+        if ($miscFiles[0].Length -ne [long]$Identity.SizeBytes) { return $false }
+        $fileHash = (Get-FileHash -LiteralPath $miscFiles[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($fileHash -ne $storedHash) { return $false }
+
+        # Manifestte misc_ro dosyasına ait tam bir satır bulunması zorunludur.
+        $expectedLine = '{0}  {1}' -f $fileHash, $miscFiles[0].Name
+        $manifestLines = @(Get-Content -LiteralPath (Join-Path $Path 'SHA256SUMS') -Encoding UTF8)
+        if (@($manifestLines | Where-Object { $_ -ieq $expectedLine }).Count -ne 1) { return $false }
+        return $true
+    }
+    catch { return $false }
+}
+
+function Find-Ex520vBackupForLiveState {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)]$LiveState)
+
+    $identity = Get-Ex520vLiveMiscRoIdentity -LiveState $LiveState
+    $paths = Get-Ex520vPaths
+    $matchesFound = @()
+    foreach ($directory in @(Get-ChildItem -LiteralPath $paths.Backups -Directory -ErrorAction SilentlyContinue)) {
+        if ($directory.Name -like '*.partial') { continue }
+        if (Test-Ex520vBackupMatchesIdentity -Path $directory.FullName -Identity $identity) {
+            $metadata = Get-Content -LiteralPath (Join-Path $directory.FullName 'backup.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+            $created = [datetimeoffset]::MinValue
+            try { $created = [datetimeoffset]::Parse([string]$metadata.created_at) } catch {}
+            $matchesFound += [pscustomobject]@{ Path = $directory.FullName; Created = $created }
+        }
+    }
+    if ($matchesFound.Count -eq 0) { return $null }
+    return ($matchesFound | Sort-Object Created -Descending | Select-Object -First 1).Path
+}
+
+function Test-Ex520vBackupForLiveState {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)]$LiveState
+    )
+
+    $identity = Get-Ex520vLiveMiscRoIdentity -LiveState $LiveState
+    return (Test-Ex520vBackupMatchesIdentity -Path $Path -Identity $identity)
+}
+
 function Save-Ex520vStockBackup {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)]$LiveState)
@@ -731,9 +848,24 @@ function Save-Ex520vStockBackup {
             $hashLines += ('{0}  {1}' -f (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $file.Name)
         }
         [IO.File]::WriteAllText((Join-Path $partial 'SHA256SUMS'), (($hashLines -join "`n") + "`n"), $script:Utf8NoBom)
-        $metadata = [ordered]@{ complete = $true; device_id = $deviceId; device_ip = $LiveState.DeviceIp; model = $LiveState.Model; system = $LiveState.System; created_at = (Get-Date).ToString('o'); partition_count = $partitions.Count }
+        $miscParts = @($partitions | Where-Object { $_.Name -eq 'misc_ro' })
+        if ($miscParts.Count -ne 1) { throw 'Yedeklenen misc_ro bölümü tekil olarak bulunamadı.' }
+        $miscFile = Join-Path $partial ('{0}-misc_ro.bin' -f $miscParts[0].Device)
+        $miscHash = (Get-FileHash -LiteralPath $miscFile -Algorithm SHA256).Hash.ToLowerInvariant()
+        $metadata = [ordered]@{
+            complete = $true
+            device_id = $deviceId
+            misc_ro_sha256 = $miscHash
+            device_ip = $LiveState.DeviceIp
+            model = $LiveState.Model
+            system = $LiveState.System
+            created_at = (Get-Date).ToString('o')
+            partition_count = $partitions.Count
+        }
         [IO.File]::WriteAllText((Join-Path $partial 'backup.json'), (($metadata | ConvertTo-Json -Depth 4) + "`n"), $script:Utf8NoBom)
         if (-not (Test-Ex520vBackupDirectory -Path $partial -DeviceId $deviceId)) { throw 'Yedek son doğrulamadan geçemedi.' }
+        # Yeni kimlik alanının kaydedildiğini ve yerel misc_ro ile uyumunu kontrol et.
+        if (-not (Test-Ex520vBackupMatchesIdentity -Path $partial -Identity ([pscustomobject]@{ Sha256 = $miscHash; SizeBytes = $miscParts[0].Size }))) { throw 'Yedek misc_ro kimlik doğrulamasından geçemedi.' }
         Move-Item -LiteralPath $partial -Destination $final
         Write-Ex520vLog -Level INFO -Message "Stok yedekleme tamamlandı: $final"
         return $final
@@ -929,8 +1061,7 @@ function Install-Ex520vRamTrial {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)]$LiveState, [Parameter(Mandatory = $true)]$Firmware, [Parameter(Mandatory = $true)][string]$BackupPath)
 
-    $deviceId = Get-Ex520vDeviceId $LiveState
-    $backupValid = Test-Ex520vBackupDirectory -Path $BackupPath -DeviceId $deviceId
+    $backupValid = Test-Ex520vBackupForLiveState -Path $BackupPath -LiveState $LiveState
     $gate = Test-Ex520vOperationAllowed -Action RamTrial -LiveState $LiveState -BackupComplete $backupValid -FirmwareValid ([bool]$Firmware.Valid)
     if (-not $gate.Allowed) { throw ($gate.Reasons -join ' ') }
     $payload = New-Ex520vTrialPayload -Firmware $Firmware
@@ -946,7 +1077,10 @@ function Install-Ex520vRamTrial {
 
 function Start-Ex520vRamTrialWrite {
     [CmdletBinding()]
-    param([Parameter(Mandatory = $true)]$LiveState)
+    param([Parameter(Mandatory = $true)]$LiveState, [Parameter(Mandatory = $true)][string]$BackupPath)
+    if (-not (Test-Ex520vBackupForLiveState -Path $BackupPath -LiveState $LiveState)) {
+        throw 'Yazma iptal edildi: stok yedeği canlı cihazla eşleşmiyor.'
+    }
     $output = Invoke-Ex520vSsh -Profile $LiveState.Profile -DeviceIp $LiveState.DeviceIp -RemoteCommand '/tmp/stock-install-trial.sh /tmp/ex520v' -TimeoutSeconds 900
     if (-not (Test-Ex520vRemoteCompletion -Action RamTrial -ExitCode 0 -Output $output)) { throw 'RAM deneme yazma işlemi doğrulanmış başarı işareti üretmedi.' }
     Reset-Ex520vOpenWrtKnownHost -Phase Ram
@@ -957,7 +1091,7 @@ function Start-Ex520vRamTrialWrite {
 function Install-Ex520vFlashTrial {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)]$LiveState, [Parameter(Mandatory = $true)]$Firmware, [Parameter(Mandatory = $true)][string]$BackupPath, [switch]$Execute)
-    $backupValid = Test-Ex520vBackupDirectory -Path $BackupPath
+    $backupValid = Test-Ex520vBackupForLiveState -Path $BackupPath -LiveState $LiveState
     $gate = Test-Ex520vOperationAllowed -Action Flash -LiveState $LiveState -BackupComplete $backupValid -FirmwareValid ([bool]$Firmware.Valid)
     if (-not $gate.Allowed) { throw ($gate.Reasons -join ' ') }
     Send-Ex520vFile -Profile $LiveState.Profile -DeviceIp $LiveState.DeviceIp -LocalPath $Firmware.SysupgradePath -RemotePath '/tmp/ex520v-sysupgrade.bin' -TimeoutSeconds 600
@@ -1081,6 +1215,7 @@ Export-ModuleMember -Function @(
     'Resolve-Ex520vSystemState', 'Get-Ex520vLiveState', 'Test-Ex520vFlashLayout', 'Test-Ex520vRootCompatibility',
     'Test-Ex520vRemoteCompletion', 'Test-Ex520vOperationAllowed',
     'Get-Ex520vDeviceId', 'Test-Ex520vBackupDirectory', 'Find-Ex520vBackup', 'Save-Ex520vStockBackup',
+    'Get-Ex520vLiveMiscRoSha256', 'Find-Ex520vBackupForLiveState', 'Test-Ex520vBackupForLiveState',
     'Get-UbiCrc32', 'Test-Ex520vFirmwareSet', 'Get-Ex520vReleaseFirmware', 'Get-Ex520vLocalFirmware',
     'New-Ex520vTrialPayload', 'Install-Ex520vRamTrial', 'Start-Ex520vRamTrialWrite', 'Install-Ex520vFlashTrial',
     'Confirm-Ex520vOpenWrt', 'Return-Ex520vToStock', 'Restart-Ex520vDevice', 'Wait-Ex520vDeviceState',

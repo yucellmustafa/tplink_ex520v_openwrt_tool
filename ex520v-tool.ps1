@@ -72,9 +72,14 @@ function Show-MainMenu {
     [void](Update-LiveState)
     $backupText = 'Doğrulanamadı'
     if ($script:LiveState.RootSsh) {
-        $deviceId = Get-Ex520vDeviceId $script:LiveState
-        $backup = Find-Ex520vBackup -DeviceId $deviceId
-        $backupText = if ($backup) { 'Var' } else { 'Yok' }
+        try {
+            $backup = Find-Ex520vBackupForLiveState -LiveState $script:LiveState
+            $backupText = if ($backup) { 'Var' } else { 'Yok' }
+        }
+        catch {
+            Write-Ex520vLog -Level WARN -Message ('Yedek kimliği okunamadı: ' + $_.Exception.Message)
+            $backupText = 'Doğrulanamadı'
+        }
     }
     $firmware = Get-Ex520vLocalFirmware
 
@@ -165,8 +170,7 @@ function Invoke-RamTrialAction {
     $state = Update-LiveState
     $firmware = Get-ReadyFirmware
     if (-not $firmware) { Write-Warn 'İşlem iptal edildi.'; return }
-    $deviceId = Get-Ex520vDeviceId $state
-    $backup = Find-Ex520vBackup -DeviceId $deviceId
+    $backup = Find-Ex520vBackupForLiveState -LiveState $state
     if (-not $backup) { throw 'Bu cihaza ait doğrulanmış tam stok yedeği bulunamadı. Önce menü 3 ile yedek alın.' }
     Write-Info 'İmajlar hazırlanıyor, cihaza aktarılıyor ve yazmasız referans kontrolü çalıştırılıyor...'
     [void](Install-Ex520vRamTrial -LiveState $state -Firmware $firmware -BackupPath $backup)
@@ -174,7 +178,7 @@ function Invoke-RamTrialAction {
     $fresh = Update-LiveState
     $gate = Test-Ex520vOperationAllowed -Action RamTrial -LiveState $fresh -BackupComplete $true -FirmwareValid $true
     if (-not $gate.Allowed) { throw ('Cihaz durumu değişti: ' + ($gate.Reasons -join ' ')) }
-    [void](Start-Ex520vRamTrialWrite -LiveState $fresh)
+    [void](Start-Ex520vRamTrialWrite -LiveState $fresh -BackupPath $backup)
     Write-Ok 'ubi0 yazıldı ve geri okuma doğrulandı. Deneme boot ayarları etkin.'
     if (Read-ExactConfirmation -Message 'Cihaz şimdi yeniden başlatılabilir. Bağlantı kesilmesi tek başına başarı sayılmayacaktır.' -Word 'YENİDEN-BAŞLAT') {
         Restart-Ex520vDevice -LiveState $fresh
@@ -188,7 +192,7 @@ function Invoke-FlashAction {
     $state = Update-LiveState
     $firmware = Get-ReadyFirmware
     if (-not $firmware) { Write-Warn 'İşlem iptal edildi.'; return }
-    $backup = Find-Ex520vBackup -DeviceId (Get-Ex520vDeviceId $state)
+    $backup = Find-Ex520vBackupForLiveState -LiveState $state
     if (-not $backup) { throw 'Doğrulanmış stok yedeği bulunamadı.' }
     Write-Info 'Sysupgrade aktarılıyor ve sysupgrade -T kontrolü çalıştırılıyor...'
     [void](Install-Ex520vFlashTrial -LiveState $state -Firmware $firmware -BackupPath $backup)
