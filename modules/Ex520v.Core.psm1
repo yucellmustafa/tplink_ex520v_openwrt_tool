@@ -1138,7 +1138,7 @@ function Return-Ex520vToStock {
 function Restart-Ex520vDevice {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)]$LiveState)
-    try { [void](Invoke-Ex520vSsh -Profile $LiveState.Profile -DeviceIp $LiveState.DeviceIp -RemoteCommand 'sync; reboot' -TimeoutSeconds 12) }
+    try { [void](Invoke-Ex520vSsh -Profile $LiveState.Profile -DeviceIp $LiveState.DeviceIp -RemoteCommand 'reboot' -TimeoutSeconds 12) }
     catch {
         if (Test-TcpPort -Address $LiveState.DeviceIp -Port $LiveState.Profile.Port -TimeoutMs 1000) { throw }
     }
