@@ -1,0 +1,52 @@
+TP-Link EX520v OpenWrt Tool - Üçüncü Taraf Bildirimleri
+======================================================
+
+1. EX520v Tek Tuş Root Aracı
+----------------------------
+
+Kaynak: https://github.com/emrycl/EX520v-tek-tus-root-araci
+Telif: Copyright (C) 2026 Emir Yücel
+Lisans: GNU General Public License v3.0 veya sonrası
+
+`root-tool/` dizini kaynak projenin Windows dağıtım bileşenlerini içerir. İki
+SSH yoklaması cihaz bazlı host key dosyasını zorunlu kılacak şekilde güvenlik
+amacıyla değiştirilmiştir; ayrıntı `root-tool/INTEGRATION_NOTES.md` içindedir. Özgün
+lisans metni `root-tool/LICENSE`, bağımlılık bildirimleri ise
+`root-tool/THIRD_PARTY_NOTICES` dosyasındadır. Bu bileşenin ürettiği parola,
+API tokenı ve özel SSH anahtarı dağıtım paketine dahil değildir.
+
+2. yibudak/ex520v-openwrt kurulum betikleri
+-------------------------------------------
+
+Kaynak: https://github.com/yibudak/ex520v-openwrt
+Alınan sürüm: v1.0.0 / commit e24ed2b
+Lisans: GPL-2.0-or-later (upstream OpenWrt ile aynı)
+
+Şu dosyalar kaynak davranışını korumak amacıyla dahil edilmiştir:
+
+- install/backup-stock.sh (davranış referansı; Windows yedekleyici çekirdeğe uyarlanmıştır)
+- install/stock-install-trial.sh
+- install/openwrt-trial-to-flash.sh
+- install/openwrt-confirm.sh
+
+`install/openwrt-return-stock.sh`, kaynak projenin belgelenmiş slot dönüş
+komutlarına doğrulama katmanı ekleyen bu projeye ait GPL-2.0-or-later betiktir.
+
+3. mtd-utils UBI CRC32 davranışı
+--------------------------------
+
+Kaynak: https://git.infradead.org/mtd-utils.git
+Lisans: GPL-2.0-or-later
+
+Windows tarafındaki `Get-UbiCrc32` uygulaması, mtd-utils `ubicrc32` aracının
+belgelenmiş UBI başlangıç değeri (0xFFFFFFFF) ve CRC-32 polinomuyla uyumludur.
+Bu değer standart, son XOR uygulanmış CRC32 çıktısıyla aynı değildir.
+
+4. OpenWrt firmware
+-------------------
+
+Firmware dosyaları bu depoya veya kaynak paketine gömülmez. Kullanıcı isterse
+`yibudak/ex520v-openwrt` GitHub Releases üzerinden indirir. OpenWrt ve dahil
+paketlerin lisansları ilgili firmware kaynak deposunda ve imaj manifestinde
+yer alır.
+
