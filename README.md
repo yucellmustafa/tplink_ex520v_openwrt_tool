@@ -1,213 +1,191 @@
 # TP-Link EX520v OpenWrt Tool
 
-Windows 10/11 x64 üzerinde TP-Link EX520v (Türk Telekom AX3000) için stok
-yedekleme, güvenli OpenWrt deneme kurulumu, flash kurulumu, kalıcılaştırma ve
-korunmuş stok slota dönüş akışını yöneten Türkçe terminal aracıdır.
+TP-Link EX520v için stok sistem yedeği alma, OpenWrt kurma, depolama alanını
+genişletme ve stok firmware'e dönme işlemlerini yöneten Windows aracıdır.
 
-> **Deneysel ve riskli:** Bu yazılım NAND flash'a yazar. Elektrik kesintisi,
-> yanlış/bozuk imaj veya beklenmeyen donanım farkı cihazı açılmaz duruma
-> getirebilir ve UART kurtarma gerektirebilir. Yalnız sahibi olduğunuz veya
-> yönetmeye açıkça yetkili olduğunuz cihazlarda kullanın.
+> **Uyarı:** Araç NAND flash'a yazabilir. Elektrik kesintisi, yanlış dosya veya
+> işlemin yarıda kesilmesi cihazın açılmamasına neden olabilir. Başlamadan önce
+> tam yedek alın, cihazı Ethernet ile bağlayın ve sabit güç kullanın.
 
-Temel OpenWrt akışı referans projenin 26 Eylül 2026 tarihli cihaz testine
-dayanır. Entegre root motoru 17 Ekim 2026'da Windows üzerinde fiziksel
-`EX520v_V1 / EX520v-v1.0_250522` cihazda UID 0 SSH/Telnet/API düzeyinde
-doğrulandı. Aynı cihazda tam NAND yedeği, RAM denemesi, flash denemesi,
-kalıcılaştırma ve yeniden başlatma doğrulaması da tamamlandı. Ayrıntılı
-yayın kontrol listesi [HARDWARE_TESTS.md](HARDWARE_TESTS.md) dosyasındadır.
+## Özellikler
 
-## Destek kapsamı
+- Stok firmware'de root SSH erişimini açma ve doğrulama
+- Tüm MTD bölümlerini SHA256 doğrulamasıyla yedekleme
+- OpenWrt RAM denemesi, flash kurulumu ve kalıcılaştırma
+- OpenWrt depolama alanını tek menü adımıyla genişletme
+- Normal veya genişletilmiş düzenden doğrulanmış yedekle stok sisteme dönme
+- Her kritik adımdan önce cihaz, slot, imaj ve bölüm haritası kontrolü
+- Yarım kalan yeniden başlatma ve doğrulama aşamalarını güvenli biçimde sürdürme
 
-- Cihaz: yalnız `TP-Link EX520v`
-- Root aracı stok firmware'i: `EX520v_260514` (tam profil) ve
-  `EX520v-v1.0_250522` (güvenli çekirdek root profili)
-- OpenWrt imajları: `yibudak/ex520v-openwrt` projesinin EX520v release imajları
-- OpenWrt tabanı: referans v1.0.0 sürümünde OpenWrt 25.12 / kernel 6.12
-- Windows: Windows 10/11 x64, PowerShell 5.1, Windows OpenSSH Client ve `tar.exe`
-- Telefon/FXS portu: **desteklenmez**
+## Desteklenen ortam
 
-Root aracı Python 3, Chrome/Chromium ve OpenSSH gereksinimlerini kendi Windows
-başlatıcısıyla denetler; gerekirse `winget` ve UAC kullanır. Ana OpenWrt aracı
-Python, Git, WSL veya Linux terminali gerektirmez.
+| Bileşen | Destek |
+| --- | --- |
+| Cihaz | Yalnızca TP-Link EX520v |
+| Stok firmware | `EX520v_260514`, `EX520v-v1.0_250522`, `EX520v-v1.0_250120` |
+| OpenWrt | `wmemcmp/ex520v` commit `4c42b65bb00fafde863610fd0e86fdb51ba074cd` |
+| OpenWrt sürümü | SNAPSHOT `r0-6c12b87`, kernel 6.18 |
+| Bilgisayar | Windows 10/11 x64, PowerShell 5.1, OpenSSH Client ve `tar.exe` |
+| Telefon/FXS | Desteklenmez |
 
-## Mimari karar
+Başka model, stok firmware veya OpenWrt imajı kabul edilmez. Donanım üzerinde
+uygulanan testlerin kaydı [HARDWARE_TESTS.md](HARDWARE_TESTS.md) dosyasındadır.
 
-PowerShell 5.1 seçildi: Windows 10/11'de yerleşik, OpenSSH ve dosya/hash API'leri
-için yeterli ve tek EXE başlatıcısına paketlenebilir. Windows katmanı cihazın
-canlı durumunu tekrar tekrar belirler ve aşama sırasını uygular. NAND yazma
-komutları yeniden icat edilmemiştir; donanımda denenmiş referans shell
-betikleri cihaza aktarılıp kendi model, slot, UBI, CRC/SHA ve boot environment
-kontrolleriyle çalıştırılır.
+## Başlamadan önce
 
-Yerel `state/last-operation.json` yalnız bilgi amaçlıdır. Program yeniden
-açıldığında hiçbir aşama bu kayda güvenilerek başarılı sayılmaz.
+1. Bilgisayarı cihazın LAN portuna Ethernet kablosuyla bağlayın.
+2. Cihazı ve bilgisayarı işlem boyunca kapatmayın.
+3. Önce menü 3 ile tam stok yedeği alın.
+4. Kurulum tamamlanana kadar OpenWrt root parolasını değiştirmeyin.
+5. Uyarı ekranlarını okuyun; yalnızca ne yaptığınızdan eminseniz devam edin.
 
-## Güvenli kurulum sırası
-
-1. Cihazı Ethernet kablosuyla bağlayın.
-2. Menü 2 ile root aracını çalıştırın. Araç model ve firmware profilini kendi
-   içinde doğrular. `EX520v-v1.0_250522` sürümünde UID 0 SSH/Telnet/API kurulur;
-   yeni firmware'e özgü web-panel bellek yamaları güvenlik için atlanır.
-3. Ana araç TCP/2222 üzerinde cihaza özel anahtar ve `known_hosts` dosyasıyla
-   gerçek UID 0 erişimini doğrular.
-4. Menü 3 ile bütün MTD bölümlerini, `/proc/mtd`, U-Boot environment ve canlı
-   device tree'yi yedekleyin. Boyutlar ve SHA256 doğrulanmadan ilerlenmez.
-5. Menü 4, stok sistemin `ubi1` slotunda çalıştığını doğrular; initramfs
-   kernelini ve sysupgrade içindeki squashfs root'u pasif `ubi0` slotuna
-   `uboot/kernel/rootfs` volume düzeniyle yazar. `ubicrc32` geri okuması ve
-   `ex520v_trial`/`tp_boot_idx` sırası referans betikte korunur.
-6. Yeniden açılışın gerçekten RAM/initramfs denemesi olduğu doğrulanır.
-7. Menü 5, yalnız bu ortamda `sysupgrade -T` sonrasında `ubi0` volume'lerini
-   flash OpenWrt düzenine çevirir ve geri okur.
-8. Flash deneme açılışı doğrulandıktan sonra menü 6 ayrı yazılı onayla kurulumu
-   kalıcı yapar. Stok firmware `ubi1` slotunda kalır.
-
-Her kritik aşama öncesinde canlı model, sistem, slot ve geri dönüş durumu
-yeniden okunur. Bağlantının kesilmesi başarı kabul edilmez; beklenen sistemle
-yeniden SSH bağlantısı kurulmadan başarı gösterilmez.
+Onay sorularında yalnızca `e` veya `h` kabul edilir. Boş Enter geçerli değildir
+ve soru yeniden gösterilir.
 
 ## Çalıştırma
 
-Kaynak koddan:
+Release paketindeki `ex520v-tool.exe` dosyasını çalıştırın veya kaynak koddan:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\ex520v-tool.ps1
 ```
 
-Farklı cihaz adresi:
+Cihaz farklı bir IP adresindeyse:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\ex520v-tool.ps1 -DeviceIp 192.168.0.1
 ```
 
-Release paketinde `ex520v-tool.exe` dosyasına çift tıklayın. Aracı internetten
-indirdiyseniz ZIP ve EXE kaynağını ayrıca doğrulayın.
+Varsayılan cihaz adresi `192.168.1.1`'dir.
+
+## Önerilen kurulum sırası
+
+1. **Bağlantıyı kontrol edin:** Menü 1
+2. **Root SSH erişimini açın:** Menü 2
+3. **Tam stok yedeği alın:** Menü 3
+4. **OpenWrt RAM denemesini başlatın:** Menü 4
+5. **OpenWrt'yi flash'a kurun:** Menü 5
+6. **Kurulumu kalıcı yapın:** Menü 6
+7. İsterseniz **depolama alanını genişletin:** Menü G
+
+Araç her yeniden başlatmadan sonra beklenen sistemin gerçekten açıldığını
+denetler. SSH bağlantısının kesilmesi tek başına başarı sayılmaz.
+
+## Menü
+
+| Seçim | İşlem |
+| --- | --- |
+| 1 | Cihaz bağlantısını kontrol et |
+| 2 | Root SSH erişimi aç / kontrol et |
+| 3 | Stok firmware yedeği al |
+| 4 | OpenWrt RAM deneme kurulumu |
+| 5 | OpenWrt flash kurulumu |
+| 6 | OpenWrt kurulumunu kalıcı yap |
+| 7 | Stok firmware'e geri dön |
+| 8 | Dosyaları ve gereksinimleri kontrol et |
+| 9 | İşlem kayıtları ve cihaz bilgileri |
+| G | OpenWrt depolama alanını genişlet |
+| A | Cihaz IP adresini değiştir |
+| 0 | Çıkış |
 
 ## Firmware dosyaları
 
-Menü 8 son kararlı GitHub Release sürümünü indirebilir. İki imaj ve
-`SHA256SUMS.ex520v` aynı release dizinine konur. Araç:
+Araç gerekli firmware paketini şu sabit adresten indirebilir:
 
-- iki SHA256 değerini,
-- initramfs FIT başlığını,
-- sysupgrade tar yapısını,
-- `kernel`, `root`, `CONTROL` üyelerini,
-- `BOARD=tplink_ex520v` (veya `tplink,ex520v`) cihaz metadata'sını
+<https://github.com/yucellmustafa/tplink_ex520v_openwrt_tool/releases/download/OpenWrt/tplink_ex520v_openwrt.zip>
 
-doğrular. Dosya adı tek başına güven kanıtı değildir. Elle seçilen dosyalarda
-da checksum manifesti zorunludur. Farklı release dosyalarını karıştırmayın.
-GitHub CLI kuruluysa ayrıca yayın attestations bilgisini bağımsız olarak
-doğrulayabilirsiniz:
+İnternet olmadan kullanmak için ZIP dosyasını `files/` klasörüne koyabilir veya
+içeriğini doğrudan bu klasöre açabilirsiniz. Geçerli yerel dosyalar bulunduğunda
+yeniden indirme yapılmaz.
 
-```powershell
-gh attestation verify .\openwrt-*-tplink_ex520v-*.bin -R yibudak/ex520v-openwrt
+Kabul edilen imajların SHA256 değerleri:
+
+```text
+initramfs: 969955078a93f27a7f70a3e71a76c111199f7df53434d6d2e5158d749535f5e4
+sysupgrade: 3f066005e89afc8fae214e874ea3b4e40d9ad0639daff494b4ff258f7a1bbe0b
 ```
 
-## Root SSH ve anahtarlar
+Araç hash değerlerinin yanında FIT başlığını, sysupgrade arşiv yapısını ve
+EX520v cihaz metadata'sını da doğrular. Farklı sürümlere ait dosyaları
+karıştırmayın veya dosya adlarını değiştirmeyin.
 
-Entegre bileşen [emrycl/EX520v-tek-tus-root-araci](https://github.com/emrycl/EX520v-tek-tus-root-araci)
-projesidir. Stok erişim TCP/2222 üzerinde, cihaza özel RSA anahtarıyla UID 0
-olarak açılır. Araç standart port 22 veya sabit parola varsaymaz.
+## Yedekleme ve stok sisteme dönüş
 
-Kimlik bilgileri `%USERPROFILE%\.local\state\ex520-root\devices\...` altında
-root aracı tarafından tutulur. Özel anahtar, parola ve API tokenı günlüklere
-yazılmaz. Stok SSH'de `StrictHostKeyChecking=yes`; OpenWrt ilk bağlantısında
-cihaza özel dosyada `accept-new`, sonraki bağlantılarda anahtar değişikliği
-reddedilir. Sistem genelindeki `known_hosts` değiştirilmez.
+Yedekler `Backups/YYYYMMDD-HHMMSS-cihazkimliği/` altında saklanır. Her bölümün
+boyutu ve SHA256 değeri doğrulanır. Yedekler yalnız alındıkları cihazla eşleşirse
+geri yüklenebilir.
 
-Root erişimini açtıktan sonra stok firmware'i fabrika ayarına döndürmek root
-erişimini ve cihaz anahtarını geçersiz kılabilir.
+`misc_ro` bölümü cihaza özel MAC adresleri ve Wi-Fi kalibrasyon verileri içerir.
+Yedek klasörünü özel veri kabul edin ve çevrimdışı ikinci bir konumda saklayın.
 
-## Stok yedekleme
+Menü 7 iki durumu otomatik ayırır:
 
-Yedekler `Backups/YYYYMMDD-HHMMSS-cihazkimliği/` altında tutulur. Yedekleme
-salt okunurdur; `/dev/mtd*` verisini `cat` ile okur ve hiçbir flash yazma aracı
-çağırmaz. Her bölümün boyutu `/proc/mtd` ile eşleşmeli, device tree en az 1 KiB
-olmalı ve bütün `.bin`/`.dtb` dosyaları SHA256 manifestinden geçmelidir.
+- Normal düzende korunmuş stok slotu doğrulanır ve yeniden seçilir.
+- Genişletilmiş düzende aynı cihaza ait tam yedek kullanılarak stok bölüm
+  haritası geri yüklenir.
 
-`misc_ro` Wi-Fi kalibrasyonu ve cihaza özgü MAC bilgileri içerir. Yedekleri
-özel veri kabul edin ve güvenli, çevrimdışı ikinci bir konumda saklayın.
+Genişletilmiş düzenden stok sisteme dönüş 10 dakikadan uzun sürebilir. Yazma,
+geri okuma, yeniden açılış ve son doğrulamalar tamamlanana kadar uygulamayı
+kapatmayın; Ethernet bağlantısını veya cihazın gücünü kesmeyin. İşlem sonrası
+OpenWrt ayarları, paketleri ve genişletilmiş depolama alanı silinir.
 
-Bu sürüm yedek dosyalarını flash'a geri yüklemez. Doğrulanmış tam EX520v geri
-yükleme prosedürü olmadan böyle bir özellik güvenli değildir.
+## Depolama alanını genişletme (G)
 
-## Stok firmware'e dönüş
+G seçeneği kalıcı OpenWrt kurulumundaki küçük depolama alanını genişletir. İşlem
+başlamadan önce uyumlu firmware, tam cihaz yedeği, bölüm haritası, U-Boot,
+kalibrasyon verisi ve çalışan overlay kontrol edilir.
 
-Menü 7, yalnız çalışan OpenWrt üzerinden `ubi1` içindeki `uboot`, `kernel` ve
-`rootfs` volume'lerinin var ve dolu olduğunu kontrol eder. Ardından deneme
-bayrağını siler, `tp_boot_idx=1` yazar ve geri okur. Bu, yedekten geri yükleme
-değil, korunmuş stok slotunu seçme işlemidir.
+Bu işlem stok firmware'in kullandığı ikincil alanları OpenWrt verisine ayırır.
+Ham bölüm yaklaşık 407 MiB'dir; UBI/UBIFS metadata'sı ve bozuk blok rezervleri
+nedeniyle kullanılabilir alan daha az olur. Test edilen cihazda yaklaşık
+356 MiB toplam alan görülmüştür, ancak bu değer her NAND için garanti edilmez.
 
-SSH yoksa, `ubi1` doğrulanamıyorsa veya cihaz açılmıyorsa araç durur. Bu durumda
-UART (3.3 V, 115200 8N1; VCC bağlamayın) üzerinden kurtarma gerekebilir.
+Genişletmeden sonra stok sisteme dönüş yalnız aynı cihaza ait doğrulanmış tam
+yedekle yapılır. Menü 7 gerekli bölüm haritasını ve stok verilerini geri yükler.
 
-## Kurulum sonrası
+## Sık karşılaşılan sorunlar
 
-Referans imajın ilk açılış değerleri:
+- **Root SSH aktif değil:** Menü 2'yi çalıştırın. Desteklenmeyen stok firmware'de
+  root işlemi başlatılmaz.
+- **İmajlar hazır değil:** Menü 8 ile dosyaları denetleyin ve gerekirse firmware
+  ZIP paketini indirin.
+- **SHA256 veya metadata hatası:** Dosyaları yeniden indirin; farklı firmware
+  sürümlerini birlikte kullanmayın.
+- **Yeniden açılış uzun sürüyor:** İlk açılış ve genişletilmiş stok dönüşü zaman
+  alabilir. Araç hata vermeden güç döngüsünü tekrarlamayın.
+- **SSH host key değişti:** Aynı IP'de başka cihaz veya sıfırlanmış sistem
+  bulunabilir. Cihaz kimliğini doğrulamadan kayıtları silmeyin.
+- **OpenWrt root parolası değiştirildi:** Araç otomatik SSH bağlantısı kuramaz.
+  Kurulum aşamalarını parola değişikliğinden önce tamamlayın.
 
-- Wi-Fi adı: `OpenWrt-EX520v`
-- Wi-Fi parolası: `openwrt-ex520v`
-- LuCI: `http://192.168.1.1`
-- root parolası: boş
+Cihaz açılmıyorsa veya hiçbir SSH bağlantısı kurulamıyorsa UART kurtarma
+gerekebilir. UART günlük kullanım ya da normal kurulum akışının parçası değildir.
 
-İlk iş Wi-Fi adını/parolasını ve root parolasını değiştirin. Kalıcılaştırma
-bitene kadar aracın SSH doğrulamasını tamamlayabilmesi için root parolasını
-değiştirmeyin; aksi durumda Windows OpenSSH ile otomatik bağlantı kurulamaz.
+## Test ve paket oluşturma
 
-## Sık karşılaşılan hatalar
-
-- **Web var, root SSH yok:** Menü 2'yi çalıştırın; desteklenen stok firmware
-  dışında root işlemi yapılmaz.
-- **SSH anahtarı bulunamadı:** Root aracını aynı Windows kullanıcı hesabında
-  çalıştırın; anahtarları elle başka cihazdan kopyalamayın.
-- **Host key değişti:** IP'de başka cihaz veya fabrika sıfırlama olabilir.
-  Kimliği doğrulamadan `known_hosts` kaydını silmeyin.
-- **Stok ubi1'den çalışmıyor:** RAM kurulumunu zorlamayın. Mevcut slot durumunu
-  ve önceki işlemleri inceleyin.
-- **SHA256/metadata hatası:** Dosyayı yeniden indirin; farklı sürümleri
-  karıştırmayın.
-- **Yeniden açılış doğrulanmıyor:** Beş dakikalık ilk açılışı bekleyin. Güç
-  döngüsünü körlemesine tekrarlamayın; gerekirse UART logunu inceleyin.
-- **OpenWrt parolası değiştirildi:** Araç etkileşimsiz SSH kuramaz. Kurulum
-  aşamalarını parola değişikliğinden önce tamamlayın veya yetkili anahtar
-  erişimini elle yapılandırın.
-
-## Testler
+Testleri çalıştırmak için:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\run-tests.ps1
+py -3 -m unittest discover -s tests -p "test_*.py" -v
 ```
 
-Testler yanlış model/firmware, eksik anahtar, SHA256 uyuşmazlığı, yarım yedek,
-yanlış slot/sıra, fallback ve boot environment hataları, SSH kesilmesi, UBI
-geri okuma hatası, beklenmeyen reboot ve UBI CRC32 vektörünü kapsar. Bunlar
-mock/saf mantık testleridir; gerçek NAND testi değildir.
-
-## EXE ve Windows ZIP paketi
-
-Bir kez PS2EXE kurun:
+EXE ve Windows ZIP paketi oluşturmak için önce PS2EXE'yi kurun:
 
 ```powershell
 Install-Module ps2exe -Scope CurrentUser
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build.ps1 -Version 0.7.8
 ```
 
-Sonra:
-
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build.ps1 -Version 0.3.0
-```
-
-Betik önce testleri çalıştırır, x64 `ex520v-tool.exe` üretir, gerekli
-`modules/`, `install/` ve GPL uyumlu `root-tool/` bileşenlerini paketler,
-Windows ZIP'i ve `.sha256` dosyasını `release/` altında oluşturur. Firmware,
-yedek, günlük ve kullanıcı kimlik bilgileri pakete alınmaz.
+Build betiği testleri çalıştırır, kök dizindeki `icon.png` dosyasını uygulama
+simgesi olarak kullanır ve çıktıları `release/` klasörüne yazar. Firmware,
+yedekler, günlükler ve kullanıcı kimlik bilgileri pakete eklenmez.
 
 ## Kaynaklar ve lisans
 
-- Windows yaklaşımı: [yucellmustafa/tplink_ex20v_openwrt_tool](https://github.com/yucellmustafa/tplink_ex20v_openwrt_tool)
-- EX520v OpenWrt ve donanımda denenmiş kurulum betikleri: [yibudak/ex520v-openwrt](https://github.com/yibudak/ex520v-openwrt)
+- OpenWrt firmware: [wmemcmp/ex520v](https://github.com/wmemcmp/ex520v)
 - Stok root bileşeni: [emrycl/EX520v-tek-tus-root-araci](https://github.com/emrycl/EX520v-tek-tus-root-araci)
+- Windows araç yaklaşımı: [yucellmustafa/tplink_ex20v_openwrt_tool](https://github.com/yucellmustafa/tplink_ex20v_openwrt_tool)
 
-Birleşik proje, dahil edilen GPL-3.0-or-later root bileşeni nedeniyle
-GPL-3.0-or-later altında dağıtılır. Ayrıntılar [LICENSE](LICENSE) ve
-[THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES) dosyalarındadır.
+Proje GPL-3.0-or-later lisansı altında dağıtılır. Ayrıntılar için
+[LICENSE](LICENSE) ve [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES) dosyalarına bakın.

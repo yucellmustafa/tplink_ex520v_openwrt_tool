@@ -56,6 +56,7 @@ SUPPORTED_MODEL = "EX520v"
 SUPPORTED_FIRMWARE_PROFILES = {
     "EX520v_260514": "full",
     "EX520v-v1.0_250522": "legacy-core",
+    "EX520v-v1.0_250120": "legacy-core",
 }
 LEGACY_WEB_TARGETS = (
     "/web/main/operateMode.htm",

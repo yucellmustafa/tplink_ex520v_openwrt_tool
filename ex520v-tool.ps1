@@ -37,11 +37,15 @@ function Write-Warn([string]$Text) { Write-Host $Text -ForegroundColor Yellow }
 function Write-Fail([string]$Text) { Write-Host $Text -ForegroundColor Red }
 function Write-Info([string]$Text) { Write-Host $Text -ForegroundColor Cyan }
 
-function Read-ExactConfirmation {
-    param([Parameter(Mandatory = $true)][string]$Message, [Parameter(Mandatory = $true)][string]$Word)
+function Read-YesNoConfirmation {
+    param([Parameter(Mandatory = $true)][string]$Message)
     Write-Warn $Message
-    $answer = Read-Host "Devam etmek için $Word yazın"
-    return ($answer -ceq $Word)
+    while ($true) {
+        $answer = (Read-Host 'Devam etmek istiyor musunuz? (e/H)').Trim()
+        if ($answer -match '^[eE]$') { return $true }
+        if ($answer -match '^[hH]$') { return $false }
+        Write-Warn 'Geçersiz seçim. Yalnızca e veya h yazın; boş bırakılamaz.'
+    }
 }
 
 function Update-LiveState {
@@ -104,6 +108,7 @@ function Show-MainMenu {
     Write-Host "7. Stok firmware'e geri dön"
     Write-Host '8. Dosyaları ve gereksinimleri kontrol et'
     Write-Host '9. İşlem kayıtları ve cihaz bilgileri'
+    Write-Host 'G. OpenWrt depolama alanını genişlet'
     Write-Host 'A. Cihaz IP adresini değiştir'
     Write-Host '0. Çıkış'
     Write-Host '--------------------------------------------------------'
@@ -112,24 +117,8 @@ function Show-MainMenu {
 function Get-ReadyFirmware {
     $firmware = Get-Ex520vLocalFirmware
     if ($firmware) { return $firmware }
-    Write-Warn 'Doğrulanmış EX520v firmware çifti bulunamadı.'
-    Write-Host '1) Son kararlı GitHub sürümünü indir ve doğrula'
-    Write-Host '2) Yerel dosyaları seç'
-    Write-Host '0) İptal'
-    $choice = Read-Host 'Seçim'
-    if ($choice -eq '1') {
-        Write-Info 'Firmware GitHub Releases üzerinden indiriliyor...'
-        return Get-Ex520vReleaseFirmware
-    }
-    if ($choice -eq '2') {
-        $init = Read-Host 'initramfs-kernel.bin tam yolu'
-        $sys = Read-Host 'squashfs-sysupgrade.bin tam yolu'
-        $sha = Read-Host 'SHA256SUMS.ex520v veya sha256sums tam yolu'
-        $result = Test-Ex520vFirmwareSet -InitramfsPath $init -SysupgradePath $sys -ManifestPath $sha
-        if (-not $result.Valid) { throw ('Firmware doğrulanamadı: ' + ($result.Errors -join ' ')) }
-        return $result
-    }
-    return $null
+    Write-Info 'EX520v firmware ZIP paketi indiriliyor, açılıyor ve SHA256 ile doğrulanıyor...'
+    return Get-Ex520vReleaseFirmware
 }
 
 function Invoke-ConnectionCheck {
@@ -149,10 +138,10 @@ function Invoke-RootAccess {
     $state = Update-LiveState
     if ($state.Transport -eq 'Stock' -and $state.RootSsh) { Write-Ok 'Stok sistemde UID 0 SSH zaten aktif; yeniden root işlemi yapılmadı.'; return }
     if (-not $state.WebReachable) { throw 'Stok web paneline ulaşılamıyor. Ethernet bağlantısını ve IP adresini kontrol edin.' }
-    Write-Warn 'Root aracı EX520v_260514 (tam) ve EX520v-v1.0_250522 (çekirdek root) profillerini destekler.'
+    Write-Warn 'Root aracı EX520v_260514 (tam), EX520v-v1.0_250522 ve EX520v-v1.0_250120 (çekirdek root) profillerini destekler.'
     Write-Warn 'Windows root motoru eski firmware cihazda doğrulandı; temiz sistem bağımlılık kurulumu ayrıca test edilmelidir.'
     Write-Host 'Gerekirse Chrome açılır; stok web panelinde kendi bilgilerinizle giriş yapmanız istenir.'
-    if (-not (Read-ExactConfirmation -Message 'Root aracı kendi uyumluluk ve imza kontrollerini çalıştıracaktır.' -Word 'ROOT')) { Write-Warn 'İşlem iptal edildi.'; return }
+    if (-not (Read-YesNoConfirmation -Message 'Root aracı kendi uyumluluk ve imza kontrollerini çalıştıracaktır.')) { Write-Warn 'İşlem iptal edildi.'; return }
     Start-Ex520vRootTool -DeviceIp $script:DeviceIp
     $after = Update-LiveState
     if ($after.Transport -eq 'Stock' -and $after.RootSsh) { Write-Ok 'Root SSH port 2222 üzerinde anahtar tabanlı UID 0 olarak doğrulandı.' }
@@ -172,18 +161,37 @@ function Invoke-RamTrialAction {
     if (-not $firmware) { Write-Warn 'İşlem iptal edildi.'; return }
     $backup = Find-Ex520vBackupForLiveState -LiveState $state
     if (-not $backup) { throw 'Bu cihaza ait doğrulanmış tam stok yedeği bulunamadı. Önce menü 3 ile yedek alın.' }
+    if ($state.System -eq 'Stok' -and $state.CommandLine -match '(^|\s)ubi\.mtd=ubi0(\s|$)') {
+        Write-Warn 'Stok sistem birincil ubi0 slotundan çalışıyor. ubi0 aktifken OpenWrt bu slota güvenle yazılamaz.'
+        Write-Info 'Pasif ubi1 slotunun 40 MiB içeriği aynı cihaza ait doğrulanmış yedekle SHA256 üzerinden karşılaştırılıyor...'
+        $slot = Test-Ex520vSecondaryStockSlot -LiveState $state -BackupPath $backup
+        if (-not (Read-YesNoConfirmation -Message 'Araç yalnız boot seçimini doğrulanmış stok ubi1 slotuna alıp cihazı yeniden başlatacaktır. Bu aşamada hiçbir MTD bölümü yazılmaz.')) { Write-Warn 'İşlem iptal edildi.'; return }
+        $fresh = Update-LiveState
+        [void](Select-Ex520vSecondaryStockSlot -LiveState $fresh -Verification $slot)
+        Restart-Ex520vDevice -LiveState $fresh
+        Write-Info 'Cihazın doğrulanmış stok ubi1 slotuyla açılması bekleniyor...'
+        $state = Wait-Ex520vDeviceState -DeviceIp $script:DeviceIp -ExpectedSystems @('Stok') -CommandLinePattern '(^|\s)ubi\.mtd=ubi1(\s|$)'
+        if ($state.BootIndex -ne '1') { throw 'Stok ubi1 ile açıldı ancak tp_boot_idx=1 doğrulanamadı.' }
+        $backup = Find-Ex520vBackupForLiveState -LiveState $state
+        if (-not $backup) { throw 'Slot geçişinden sonra aynı cihaza ait doğrulanmış stok yedeği bulunamadı.' }
+        Write-Ok 'Stok sistem doğrulanmış ubi1 slotundan açıldı; ubi0 artık pasif ve OpenWrt denemesi için güvenli.'
+    }
     Write-Info 'İmajlar hazırlanıyor, cihaza aktarılıyor ve yazmasız referans kontrolü çalıştırılıyor...'
     [void](Install-Ex520vRamTrial -LiveState $state -Firmware $firmware -BackupPath $backup)
-    if (-not (Read-ExactConfirmation -Message 'Bu işlem pasif ubi0 slotunu biçimlendirip OpenWrt deneme imajını yazacaktır. Çalışan ubi1 stok slotuna dokunulmaz.' -Word 'OPENWRT')) { Write-Warn 'Yazma işlemi iptal edildi.'; return }
+    if (-not (Read-YesNoConfirmation -Message 'Bu işlem pasif ubi0 slotunu biçimlendirip OpenWrt deneme imajını yazacaktır. Çalışan ubi1 stok slotuna dokunulmaz.')) { Write-Warn 'Yazma işlemi iptal edildi.'; return }
     $fresh = Update-LiveState
     $gate = Test-Ex520vOperationAllowed -Action RamTrial -LiveState $fresh -BackupComplete $true -FirmwareValid $true
     if (-not $gate.Allowed) { throw ('Cihaz durumu değişti: ' + ($gate.Reasons -join ' ')) }
     [void](Start-Ex520vRamTrialWrite -LiveState $fresh -BackupPath $backup)
     Write-Ok 'ubi0 yazıldı ve geri okuma doğrulandı. Deneme boot ayarları etkin.'
-    if (Read-ExactConfirmation -Message 'Cihaz şimdi yeniden başlatılabilir. Bağlantı kesilmesi tek başına başarı sayılmayacaktır.' -Word 'YENİDEN-BAŞLAT') {
+    if (Read-YesNoConfirmation -Message 'Cihaz şimdi yeniden başlatılabilir. Bağlantı kesilmesi tek başına başarı sayılmayacaktır.') {
         Restart-Ex520vDevice -LiveState $fresh
         Write-Info 'Cihazın RAM deneme ortamıyla açılması bekleniyor...'
-        $verified = Wait-Ex520vDeviceState -DeviceIp $script:DeviceIp -ExpectedSystems @('RAM deneme')
+        $verified = Wait-Ex520vDeviceState -DeviceIp $script:DeviceIp -ExpectedSystems @('RAM deneme', 'OpenWrt RAM')
+        if ($verified.System -eq 'OpenWrt RAM') {
+            Write-Info 'Initramfs açılışı doğrulandı; stok geri dönüş boot ayarları etkinleştiriliyor...'
+            $verified = Arm-Ex520vRamTrialFallback -LiveState $verified
+        }
         Write-Ok "RAM deneme ortamı canlı cihazdan doğrulandı: $($verified.Firmware)"
     }
 }
@@ -196,26 +204,35 @@ function Invoke-FlashAction {
     if (-not $backup) { throw 'Doğrulanmış stok yedeği bulunamadı.' }
     Write-Info 'Sysupgrade aktarılıyor ve sysupgrade -T kontrolü çalıştırılıyor...'
     [void](Install-Ex520vFlashTrial -LiveState $state -Firmware $firmware -BackupPath $backup)
-    if (-not (Read-ExactConfirmation -Message 'Bu işlem yalnız doğrulanmış RAM deneme ortamındaki ubi0 volume düzenini flash OpenWrt için yeniden yazacaktır.' -Word 'FLASH')) { Write-Warn 'Yazma işlemi iptal edildi.'; return }
+    if (-not (Read-YesNoConfirmation -Message 'Bu işlem yalnız doğrulanmış RAM deneme ortamındaki ubi0 volume düzenini flash OpenWrt için yeniden yazacaktır.')) { Write-Warn 'Yazma işlemi iptal edildi.'; return }
     $fresh = Update-LiveState
     $gate = Test-Ex520vOperationAllowed -Action Flash -LiveState $fresh -BackupComplete $true -FirmwareValid $true
     if (-not $gate.Allowed) { throw ('Cihaz durumu değişti: ' + ($gate.Reasons -join ' ')) }
     [void](Install-Ex520vFlashTrial -LiveState $fresh -Firmware $firmware -BackupPath $backup -Execute)
     Write-Ok 'OpenWrt flash volume yazmaları ve geri okuma doğrulaması tamamlandı.'
-    if (Read-ExactConfirmation -Message 'Cihaz flash deneme sistemiyle açılmak üzere yeniden başlatılabilir.' -Word 'YENİDEN-BAŞLAT') {
+    if (Read-YesNoConfirmation -Message 'Cihaz flash deneme sistemiyle açılmak üzere yeniden başlatılabilir.') {
         Restart-Ex520vDevice -LiveState $fresh
         Write-Info 'Flash deneme ortamı bekleniyor...'
-        [void](Wait-Ex520vDeviceState -DeviceIp $script:DeviceIp -ExpectedSystems @('Flash deneme'))
+        $verified = Wait-Ex520vDeviceState -DeviceIp $script:DeviceIp -ExpectedSystems @('Flash deneme')
+        Write-Info 'Flash deneme açılışı doğrulandı; stok geri dönüş boot ayarı yeniden etkinleştiriliyor...'
+        [void](Arm-Ex520vFlashTrialFallback -LiveState $verified -BackupPath $backup)
         Write-Ok 'OpenWrt flash üzerinden, stok geri dönüşü etkin durumda doğrulandı.'
     }
 }
 
 function Invoke-ConfirmAction {
     $state = Update-LiveState
+    if ($state.System -eq 'Flash deneme' -and $state.Trial -eq '1' -and -not $state.BootIndex) {
+        Write-Warn 'Flash deneme açılışının son fallback adımı yarım kalmış; doğrulanmış stok alanı denetlenip boot ayarı tamamlanıyor...'
+        $backup = Find-Ex520vBackupForLiveState -LiveState $state
+        if (-not $backup) { throw 'Fallback onarımı için bu cihaza ait doğrulanmış tam stok yedeği bulunamadı.' }
+        $state = Arm-Ex520vFlashTrialFallback -LiveState $state -BackupPath $backup
+        Write-Ok 'Stok geri dönüş boot ayarı yeniden etkinleştirildi.'
+    }
     $gate = Test-Ex520vOperationAllowed -Action Confirm -LiveState $state
     if (-not $gate.Allowed) { throw ($gate.Reasons -join ' ') }
     Write-Warn 'Kalıcılaştırma, her açılışta stoka dönüşü sağlayan deneme bayrağını kaldırır. Stok firmware ubi1 slotunda korunur.'
-    if (-not (Read-ExactConfirmation -Message 'OpenWrt işlevlerini test ettiyseniz devam edin.' -Word 'KALICI')) { Write-Warn 'İşlem iptal edildi.'; return }
+    if (-not (Read-YesNoConfirmation -Message 'OpenWrt işlevlerini test ettiyseniz devam edin.')) { Write-Warn 'İşlem iptal edildi.'; return }
     $fresh = Update-LiveState
     [void](Confirm-Ex520vOpenWrt -LiveState $fresh)
     $verified = Update-LiveState
@@ -225,13 +242,42 @@ function Invoke-ConfirmAction {
 
 function Invoke-ReturnStockAction {
     $state = Update-LiveState
+    if($state.System -eq 'Stok'){
+        $restoreRecordPath=Join-Path $paths.State 'stock-restore.json'
+        $restorePending=$false
+        if(Test-Path -LiteralPath $restoreRecordPath -PathType Leaf){
+            try{$restorePending=((Get-Content -LiteralPath $restoreRecordPath -Raw -Encoding UTF8 | ConvertFrom-Json).Status -eq 'pending')}catch{}
+        }
+        if($restorePending){
+            Write-Warn 'Stok sistem açılmış; bekleyen geri yükleme yalnız açılış sonrası doğrulama aşamasından sürdürülecek.'
+            $restored=Start-Ex520vStockRestoreFromBackup -DeviceIp $script:DeviceIp -Confirmation 'STOK-YEDEK-GERI-YUKLE'
+            Write-Ok ('Stok sistem ve bölüm doğrulamaları tamamlandı: ' + $restored.CommandLine)
+        }else{Write-Ok 'Cihaz zaten stok firmware ile çalışıyor.'}
+        return
+    }
+    if($state.System -eq 'Genişletilmiş OpenWrt'){
+        $backup=Find-Ex520vStockRestoreBackup -LiveState $state
+        if(-not $backup){throw 'Bu cihaza ait doğrulanmış tam stok yedeği bulunamadı.'}
+        Write-Warn 'Genişletilmiş NAND düzeninde korunmuş stok slotu yoktur. Doğrulanmış tam yedekteki stok alanı RAM-pivot ile geri yazılacaktır.'
+        Write-Host ('Kullanılacak yedek: ' + $backup)
+        if(-not (Read-YesNoConfirmation -Message 'Bu işlem 407 MiB overlay ve içindeki tüm OpenWrt ayar/paketlerini siler; iki stok slotunu geri yükleyip cihazı stok ubi0 ile yeniden başlatır.')){Write-Warn 'Geri yükleme iptal edildi.';return}
+        Write-Warn 'Stok geri yükleme 10 dakikadan uzun sürebilir. Yazma, geri okuma ve açılış sonrası SHA256 kontrolleri tamamlanana kadar pencereyi kapatmayın ve cihazın gücünü kesmeyin.'
+        $restored=Start-Ex520vStockRestoreFromBackup -DeviceIp $script:DeviceIp -BackupPath $backup -Confirmation 'STOK-YEDEK-GERI-YUKLE'
+        Write-Ok ('Stok sistem ve 11 bölümlü NAND düzeni doğrulandı: ' + $restored.CommandLine)
+        return
+    }
+    $backup=$null
+    if($state.MtdNames -contains 'ubi' -and $state.MtdNames -notcontains 'ubi1'){
+        $backup=Find-Ex520vBackupForLiveState -LiveState $state
+        if(-not $backup){throw 'Birleşik NAND haritasında stok dönüşünü doğrulamak için bu cihaza ait tam stok yedeği bulunamadı.'}
+    }
     Write-Host 'Bu işlem yedek dosyalarını flasha geri yüklemez; korunmuş ubi1 stok slotunu seçer.'
-    [void](Return-Ex520vToStock -LiveState $state)
-    if (-not (Read-ExactConfirmation -Message 'Stok slotu doğrulandı. Sonraki açılış için ubi1 seçilecektir.' -Word 'STOKA-DÖN')) { Write-Warn 'İşlem iptal edildi.'; return }
+    [void](Return-Ex520vToStock -LiveState $state -BackupPath $backup)
+    if (-not (Read-YesNoConfirmation -Message 'Stok slotu doğrulandı. Sonraki açılış için ubi1 seçilecektir.')) { Write-Warn 'İşlem iptal edildi.'; return }
     $fresh = Update-LiveState
-    [void](Return-Ex520vToStock -LiveState $fresh -Execute)
+    [void](Return-Ex520vToStock -LiveState $fresh -BackupPath $backup -Execute)
     Write-Ok 'Stok slotu bir sonraki açılış için seçildi.'
-    if (Read-ExactConfirmation -Message 'Cihaz şimdi yeniden başlatılabilir.' -Word 'YENİDEN-BAŞLAT') {
+    if (Read-YesNoConfirmation -Message 'Cihaz şimdi yeniden başlatılabilir.') {
         Restart-Ex520vDevice -LiveState $fresh
         Write-Info 'Stok sistemin açılması bekleniyor...'
         [void](Wait-Ex520vDeviceState -DeviceIp $script:DeviceIp -ExpectedSystems @('Stok'))
@@ -253,7 +299,7 @@ function Invoke-RequirementsAction {
     }
     else { Write-Warn 'Doğrulanmış yerel firmware çifti yok.' }
     Write-Host ''
-    if ((Read-Host 'Son kararlı firmware sürümünü indirmek ister misiniz? (e/H)') -match '^[eEyY]') {
+    if ((Read-Host 'EX520v firmware ZIP paketini indirip doğrulamak ister misiniz? (e/H)') -match '^[eEyY]') {
         $downloaded = Get-Ex520vReleaseFirmware
         Write-Ok "Firmware indirildi ve doğrulandı: $($downloaded.SysupgradePath)"
     }
@@ -271,6 +317,34 @@ function Show-LogsAndInfo {
     }
 }
 
+function Invoke-StorageExpansionAction {
+    $state=Update-LiveState
+    $report=$null
+    try { $report=Get-Ex520vStorageReport -LiveState $state }
+    catch { Write-Warn ('Envanter şu anda okunamadı: ' + $_.Exception.Message) }
+    # Analysis remains available before the operator starts a write operation.
+    if ($report) {
+        $plan=Get-Ex520vExpansionPlan -Report $report
+        Write-Host 'NAND bölümleri:' -ForegroundColor Cyan
+        $report.Partitions | Sort-Object OffsetBytes | Select-Object Name,@{n='Başlangıç';e={'0x{0:x8}' -f $_.OffsetBytes}},@{n='MiB';e={$_.SizeBytes / 1MB}} | Format-Table -AutoSize
+        Write-Host ('Çalışan kök: {0}; /rom: {1}; /overlay: {2} {3} (MTD: {4})' -f $report.RootFs,$report.RomFs,$report.OverlaySource,$report.OverlayFs,$report.OverlayMtdName)
+        Write-Host ('Kök toplam/boş: {0:N1}/{1:N1} MiB' -f ($report.RootTotalBytes / 1MB),($report.RootAvailableBytes / 1MB))
+        if ($plan.OverlayMissing) { Write-Warn 'Kalıcı overlay bağlı değil. Gösterilen boş alan RAM; ayarlar ve paketler yeniden başlatmada kaybolabilir.' }
+        if ($plan.AlreadyExpanded) {
+            Write-Ok '407 MiB NAND düzeni ve ayrı UBI üzerindeki kalıcı overlay zaten aktif.'
+            if(-not (Get-Ex520vPendingStorageSession -DeviceIp $script:DeviceIp)){return}
+            Write-Warn 'Bekleyen geçiş kaydı var; G ayar geri yükleme ve kalıcılık doğrulamasını tamamlar.'
+        }
+    }
+    Write-Warn 'Bu seçenek stok ubi1, bflag, misc_rw_bak, misc_isp, runtime_data ve container alanlarını büyük OpenWrt overlay için kullanır.'
+    Write-Host 'Doğrulanmış tam stok yedeği korunursa Menü 7 bu alanları ve iki stok slotunu geri yükleyerek stoka dönebilir.'
+    Write-Host 'Hedef: 0x04900000–0x1e000000, 407 MiB ham UBI. Paketler için net boş alan imaj boyutu ve NAND rezervlerine bağlıdır; 356 MB garantisi verilmez.'
+    Write-Host 'Bootloader ve kalibrasyon korunur. wmemcmp/ex520v imajı indirilir/doğrulanır; yedek, iki sysupgrade aşaması, ayar geri yükleme ve yeniden açılış kontrolleri otomatik yürütülür.'
+    if(-not (Read-YesNoConfirmation -Message 'Tam NAND yedeği alınır; eksik overlay onarılır; iki SSH/sysupgrade aşaması çalışır. İkinci aşama stok firmware/veri alanlarını siler. Stoka dönüş yalnız bu doğrulanmış tam yedekle Menü 7 üzerinden yapılabilir. Ağ ayarları ve SSH anahtarları korunur.')){return}
+    $verified=Start-Ex520vSshStorageExpansion -DeviceIp $script:DeviceIp -EraseStockConfirmation 'STOK-SIL-407M'
+    Write-Ok ('Genişletilmiş NAND overlay doğrulandı. Toplam {0:N1} MiB, boş {1:N1} MiB.' -f ($verified.RootTotalBytes / 1MB),($verified.RootAvailableBytes / 1MB))
+}
+
 while ($true) {
     Show-MainMenu
     $choice = (Read-Host 'Seçim').Trim().ToUpperInvariant()
@@ -286,6 +360,7 @@ while ($true) {
             '7' { Invoke-ReturnStockAction }
             '8' { Invoke-RequirementsAction }
             '9' { Show-LogsAndInfo }
+            'G' { Invoke-StorageExpansionAction }
             'A' {
                 $newIp = Read-Host 'Cihaz IPv4 adresi'
                 if (-not (Test-Ex520vIPv4 $newIp)) { throw 'Geçersiz IPv4 adresi.' }

@@ -20,8 +20,9 @@ etkileyebilir. Başlamadan önce modem ayarlarınızı yedekleyin.
 - Model: `EX520v`
 - Donanım: tüm EX520v revizyonları
 - Firmware: `EX520v_260514` (tam profil)
-- Firmware: `EX520v-v1.0_250522` (çekirdek root profili: kalıcı UID 0
-  SSH/Telnet/API; sürüme bağlı web-panel bellek yamaları uygulanmaz)
+- Firmware: `EX520v-v1.0_250522` ve `EX520v-v1.0_250120` (çekirdek root
+  profili: kalıcı UID 0 SSH/Telnet/API; sürüme bağlı web-panel bellek yamaları
+  uygulanmaz)
 
 Araç kuruluma başlamadan önce model ve firmware sürümünü doğrular. Uyuşmazlık
 varsa modeme dosya göndermez.

@@ -22,6 +22,32 @@ UBIDEV=0            # set to the attached ubi0-slot device number below
 log() { echo "[ex520v] $*"; }
 die() { log "ERROR: $*"; exit 1; }
 
+setup_fw_env() {
+	local mtd count=0
+	for mtd in /sys/class/mtd/mtd[0-9]*; do
+		[ -f "$mtd/name" ] || continue
+		[ "$(cat "$mtd/name")" = u-boot-env ] || continue
+		count=$((count + 1)); ENV_MTD="${mtd##*mtd}"
+	done
+	[ "$count" = 1 ] || die "u-boot-env partition missing or duplicated"
+	ENV_CONFIG=/tmp/ex520v-fw-env.config
+	printf '/dev/mtd%s 0x0 0x20000 0x20000 1\n' "$ENV_MTD" > "$ENV_CONFIG"
+	fw_printenv -c "$ENV_CONFIG" >/dev/null 2>&1 || die "boot environment CRC cannot be verified"
+}
+
+check_part() {
+	local name="$1" offset="$2" size="$3" d count=0
+	for d in /sys/class/mtd/mtd[0-9]*; do
+		[ -f "$d/name" ] || continue
+		[ "$(cat "$d/name")" = "$name" ] || continue
+		count=$((count + 1))
+		[ "$(cat "$d/offset")" = "$offset" ] || die "unexpected $name offset"
+		[ "$(cat "$d/size")" = "$size" ] || die "unexpected $name size"
+		[ "$(cat "$d/erasesize")" = 262144 ] || die "unexpected $name erase size"
+	done
+	[ "$count" = 1 ] || die "$name partition missing or duplicated"
+}
+
 vol_id() {
 	local v
 	for v in /sys/class/ubi/ubi${UBIDEV}/ubi${UBIDEV}_*; do
@@ -52,9 +78,16 @@ write_vol() {
 # --- preconditions -----------------------------------------------------------
 [ -f "$IMG" ] || die "usage: $0 <sysupgrade.bin>"
 [ "$(board_name)" = "tplink,ex520v" ] || die "not a TP-Link EX520v"
+check_part boot 0 2097152
+check_part u-boot-env 2097152 1048576
+check_part misc_ro 3145728 15728640
+check_part misc_rw 18874368 15728640
+check_part ubi0 34603008 41943040
+check_part ubi 76546048 426770432
+setup_fw_env
 [ "$(cat /tmp/ex520v-trial 2>/dev/null)" = "armed" ] || die "trial fallback was not armed at boot"
-[ "$(fw_printenv -n ex520v_trial 2>/dev/null)" = "1" ] || die "ex520v_trial is not set"
-[ "$(fw_printenv -n tp_boot_idx 2>/dev/null)" = "1" ] || die "stock fallback (tp_boot_idx=1) is not armed"
+[ "$(fw_printenv -c "$ENV_CONFIG" -n ex520v_trial 2>/dev/null)" = "1" ] || die "ex520v_trial is not set"
+[ "$(fw_printenv -c "$ENV_CONFIG" -n tp_boot_idx 2>/dev/null)" = "1" ] || die "stock fallback (tp_boot_idx=1) is not armed"
 [ "$(awk '$2 == "/" { print $3; exit }' /proc/mounts)" != "squashfs" ] ||
 	die "not running from RAM (initramfs)"
 
@@ -112,7 +145,7 @@ umount "$MNT"
 ubiblock -r "/dev/ubi${UBIDEV}_$id"
 
 # --- boot slot ubi0 next, still as a trial ------------------------------------
-fw_setenv tp_boot_idx
-fw_printenv -n tp_boot_idx >/dev/null 2>&1 && die "tp_boot_idx still set"
+fw_setenv -c "$ENV_CONFIG" tp_boot_idx
+fw_printenv -c "$ENV_CONFIG" -n tp_boot_idx >/dev/null 2>&1 && die "tp_boot_idx still set"
 
 log "DONE: reboot to start OpenWrt from flash (trial mode stays armed)"

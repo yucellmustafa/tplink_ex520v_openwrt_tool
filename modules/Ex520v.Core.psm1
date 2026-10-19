@@ -7,8 +7,15 @@ $ErrorActionPreference = 'Stop'
 $script:ProjectRoot = Split-Path -Parent $PSScriptRoot
 $script:Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 $script:SupportedModel = 'EX520v'
-$script:SupportedRootFirmware = @('EX520v_260514', 'EX520v-v1.0_250522')
-$script:ReleaseRepository = 'yibudak/ex520v-openwrt'
+$script:SupportedRootFirmware = @('EX520v_260514', 'EX520v-v1.0_250522', 'EX520v-v1.0_250120')
+$script:ReleaseRepository = 'wmemcmp/ex520v'
+$script:FirmwareCommit = '4c42b65bb00fafde863610fd0e86fdb51ba074cd'
+$script:FirmwareArchiveName = 'tplink_ex520v_openwrt.zip'
+$script:FirmwareArchiveUrl = 'https://github.com/yucellmustafa/tplink_ex520v_openwrt_tool/releases/download/OpenWrt/tplink_ex520v_openwrt.zip'
+$script:FirmwareInitramfs = 'openwrt-mediatek-filogic-tplink_ex520v-initramfs-kernel.bin'
+$script:FirmwareInitramfsSha256 = '969955078a93f27a7f70a3e71a76c111199f7df53434d6d2e5158d749535f5e4'
+$script:FirmwareSysupgrade = 'openwrt-mediatek-filogic-tplink_ex520v-squashfs-sysupgrade.bin'
+$script:FirmwareSysupgradeSha256 = '3f066005e89afc8fae214e874ea3b4e40d9ad0639daff494b4ff258f7a1bbe0b'
 
 function Get-Ex520vPaths {
     [CmdletBinding()]
@@ -283,7 +290,7 @@ function Get-Ex520vRootProfiles {
 
 function Get-Ex520vOpenWrtProfile {
     [CmdletBinding()]
-    param([ValidateSet('Ram', 'Flash')][string]$Phase = 'Ram')
+    param([ValidateSet('Ram', 'Flash', 'Expanded')][string]$Phase = 'Ram')
     $paths = Get-Ex520vPaths
     [pscustomobject]@{
         Kind = 'OpenWrt'
@@ -296,7 +303,7 @@ function Get-Ex520vOpenWrtProfile {
 }
 
 function Reset-Ex520vOpenWrtKnownHost {
-    param([Parameter(Mandatory = $true)][ValidateSet('Ram', 'Flash')][string]$Phase)
+    param([Parameter(Mandatory = $true)][ValidateSet('Ram', 'Flash', 'Expanded')][string]$Phase)
     $profile = Get-Ex520vOpenWrtProfile -Phase $Phase
     if (Test-Path -LiteralPath $profile.KnownHostsFile) {
         Remove-Item -LiteralPath $profile.KnownHostsFile -Force
@@ -435,6 +442,7 @@ function Resolve-Ex520vSystemState {
         [string]$OverlayFs,
         [string]$RootSource,
         [string]$OverlaySource,
+        [string]$OverlayMtdName,
         [string]$Trial,
         [string]$TrialMarker,
         [string]$BootIndex
@@ -442,10 +450,15 @@ function Resolve-Ex520vSystemState {
 
     if ($Transport -eq 'Stock') {
         if ($Model -ne $script:SupportedModel) { return 'Yanlış cihaz' }
-        if ($CommandLine -match '(^|\s)ubi\.mtd=ubi1(\s|$)') { return 'Stok' }
+        # Fabrika yazılımı çift slotludur. Normal kurulum akışı güvenli geri
+        # dönüş için ubi1'den başlar; tam yedek geri yüklemesi ise varsayılan
+        # birincil slot olan ubi0'ı seçer. İkisi de geçerli stok durumudur.
+        if ($CommandLine -match '(^|\s)ubi\.mtd=ubi(?:0|1)(\s|$)') { return 'Stok' }
         return 'Bilinmiyor'
     }
     if ($Transport -ne 'OpenWrt' -or $BoardName -ne 'tplink,ex520v') { return 'Bilinmiyor' }
+    if ($RomFs -eq 'squashfs' -and $OverlayFs -eq 'ubifs' -and $OverlayMtdName -eq 'ubi' -and $CommandLine -match '(^|\s)ubi\.mtd=ubi0(\s|$)' -and -not $Trial) { return 'Genişletilmiş OpenWrt' }
+    if ($RomFs -eq 'squashfs' -and -not $OverlayFs -and $RootFs -eq 'overlay') { return 'Overlay eksik (RAM)' }
     # A normal OpenWrt squashfs installation exposes / as overlayfs.  /rom is
     # the read-only squashfs and /overlay must come from ubi0, the OpenWrt
     # slot.  Checking RootFs=squashfs therefore misclassifies a real flash
@@ -455,10 +468,15 @@ function Resolve-Ex520vSystemState {
         if ([string]::IsNullOrWhiteSpace($Trial)) { return 'Kalıcı OpenWrt' }
         return 'Bilinmiyor'
     }
-    if ($RootFs -ne 'squashfs') {
+    if (-not $RomFs -and $RootFs -in @('rootfs','tmpfs')) {
         # Flash deneme volume'leri hazırlandıktan sonra tp_boot_idx kasıtlı
         # olarak silinir; çalışan initramfs yine güvenli RAM denemesidir.
         if ($Trial -eq '1' -and $BootIndex -in @('', '1') -and $TrialMarker -eq 'armed') { return 'RAM deneme' }
+        # stock-install-trial.sh deneme açılışından önce ex520v_trial=1
+        # değerini yazar. Initramfs imajında kalıcı preinit hook'u yoksa geçici
+        # işaret henüz oluşmaz ve tp_boot_idx boş kalır. Bu, fallback betiğinin
+        # güvenle tamamlaması gereken doğrulanmış ara durumdur.
+        if (-not $BootIndex -and -not $TrialMarker -and $Trial -in @('', '1')) { return 'OpenWrt RAM' }
         return 'Bilinmiyor'
     }
     return 'Bilinmiyor'
@@ -474,7 +492,7 @@ function Get-Ex520vLiveState {
         DeviceIp = $DeviceIp; WebReachable = $web; RootSsh = $false; Transport = 'None'
         System = 'Bilinmiyor'; Model = ''; Firmware = ''; Hardware = ''; BoardName = ''
         CommandLine = ''; BootIndex = ''; Trial = ''; TrialMarker = ''; MtdNames = @()
-        RootFs = ''; RomFs = ''; OverlayFs = ''; RootSource = ''; OverlaySource = ''
+        RootFs = ''; RomFs = ''; OverlayFs = ''; RootSource = ''; OverlaySource = ''; OverlayMtdName = ''
         Profile = $null; Error = ''
     }
 
@@ -508,18 +526,28 @@ function Get-Ex520vLiveState {
         $openWrtCommand = @(
             '. /lib/functions.sh'
             'echo BOARD=$(board_name)'
+            'echo CMDLINE=$(cat /proc/cmdline)'
             'echo ROOTFS=$(awk ''$2=="/"{print $3;exit}'' /proc/mounts)'
             'echo ROMFS=$(awk ''$2=="/rom"{print $3;exit}'' /proc/mounts)'
             'echo OVERLAYFS=$(awk ''$2=="/overlay"{print $3;exit}'' /proc/mounts)'
             'echo ROOTSRC=$(awk ''$2=="/rom"{print $1;exit}'' /proc/mounts)'
             'echo OVERLAYSRC=$(awk ''$2=="/overlay"{print $1;exit}'' /proc/mounts)'
-            'echo BOOTIDX=$(fw_printenv -n tp_boot_idx 2>/dev/null)'
-            'echo TRIAL=$(fw_printenv -n ex520v_trial 2>/dev/null)'
+            'overlaydev=$(awk ''$2=="/overlay"{print $1;exit}'' /proc/mounts); overlayubi=${overlaydev%_*}; overlayubi=${overlayubi#/dev/}; overlaymtd=; if [ -r /sys/class/ubi/$overlayubi/mtd_num ]; then overlaymtd=$(cat /sys/class/mtd/mtd$(cat /sys/class/ubi/$overlayubi/mtd_num)/name); fi; echo OVERLAYMTD=$overlaymtd'
+            'envmtd=$(awk -F: ''$2 ~ /"u-boot-env"/{gsub(/^mtd/,"",$1);print $1}'' /proc/mtd); envcfg=/tmp/ex520v-fw-env.config; if echo "$envmtd" | grep -Eq ''^[0-9]+$''; then printf ''/dev/mtd%s 0x0 0x20000 0x20000 1\n'' "$envmtd" > "$envcfg"; fi'
+            'echo BOOTIDX=$(fw_printenv -c "$envcfg" -n tp_boot_idx 2>/dev/null)'
+            'echo TRIAL=$(fw_printenv -c "$envcfg" -n ex520v_trial 2>/dev/null)'
             'echo TRIALMARK=$(cat /tmp/ex520v-trial 2>/dev/null)'
             '. /etc/openwrt_release; echo FIRMWARE=$DISTRIB_DESCRIPTION'
             'echo MTD=$(awk -F''"'' ''/^mtd/{print $2}'' /proc/mtd | tr ''\n'' '','')'
         ) -join '; '
-        foreach ($profile in @((Get-Ex520vOpenWrtProfile -Phase Ram), (Get-Ex520vOpenWrtProfile -Phase Flash))) {
+        $openWrtProfiles=@((Get-Ex520vOpenWrtProfile -Phase Ram), (Get-Ex520vOpenWrtProfile -Phase Flash), (Get-Ex520vOpenWrtProfile -Phase Expanded))
+        foreach($knownHostName in @('known_hosts_openwrt_current','known_hosts_post_recovery','known_hosts_storage_diagnostic')) {
+            $diagnosticHosts=Join-Path (Get-Ex520vPaths).State $knownHostName
+            if (Test-Path -LiteralPath $diagnosticHosts -PathType Leaf) {
+                $openWrtProfiles += [pscustomobject]@{Kind='OpenWrt';Id=$knownHostName;IdentityFile=$null;KnownHostsFile=$diagnosticHosts;Port=22}
+            }
+        }
+        foreach ($profile in $openWrtProfiles) {
             try {
                 $data = ConvertFrom-KeyValueText (Invoke-Ex520vSsh -Profile $profile -DeviceIp $DeviceIp -RemoteCommand $openWrtCommand)
                 $base.RootSsh = $true; $base.Transport = 'OpenWrt'; $base.Profile = $profile
@@ -529,8 +557,9 @@ function Get-Ex520vLiveState {
                 $base.RootFs = [string]$data.ROOTFS; $base.RomFs = [string]$data.ROMFS
                 $base.OverlayFs = [string]$data.OVERLAYFS; $base.RootSource = [string]$data.ROOTSRC
                 $base.OverlaySource = [string]$data.OVERLAYSRC
+                $base.CommandLine = [string]$data.CMDLINE; $base.OverlayMtdName = [string]$data.OVERLAYMTD
                 $base.MtdNames = @(([string]$data.MTD -split ',') | Where-Object { $_ })
-                $base.System = Resolve-Ex520vSystemState -Transport OpenWrt -BoardName $base.BoardName -RootFs $base.RootFs -RomFs $base.RomFs -OverlayFs $base.OverlayFs -RootSource $base.RootSource -OverlaySource $base.OverlaySource -Trial $base.Trial -TrialMarker $base.TrialMarker -BootIndex $base.BootIndex
+                $base.System = Resolve-Ex520vSystemState -Transport OpenWrt -BoardName $base.BoardName -CommandLine $base.CommandLine -RootFs $base.RootFs -RomFs $base.RomFs -OverlayFs $base.OverlayFs -RootSource $base.RootSource -OverlaySource $base.OverlaySource -OverlayMtdName $base.OverlayMtdName -Trial $base.Trial -TrialMarker $base.TrialMarker -BootIndex $base.BootIndex
                 $base.Error = ''
                 return [pscustomobject]$base
             }
@@ -545,6 +574,14 @@ function Test-Ex520vFlashLayout {
     param([string[]]$MtdNames)
     $required = @('boot', 'u-boot-env', 'misc_ro', 'misc_rw', 'ubi0', 'ubi1', 'bflag', 'container')
     return (@($required | Where-Object { $_ -notin $MtdNames }).Count -eq 0)
+}
+
+function Test-Ex520vOpenWrtLayout {
+    [CmdletBinding()]
+    param([string[]]$MtdNames)
+    $required = @('boot', 'u-boot-env', 'misc_ro', 'misc_rw', 'ubi0', 'ubi')
+    return (@($required | Where-Object { $_ -notin $MtdNames }).Count -eq 0 -and
+        @($MtdNames | Where-Object { $_ -in $required }).Count -eq $required.Count)
 }
 
 function Test-Ex520vRootCompatibility {
@@ -583,11 +620,17 @@ function Test-Ex520vOperationAllowed {
     $reasons = New-Object Collections.Generic.List[string]
     if (-not $LiveState.RootSsh) { [void]$reasons.Add('UID 0 SSH bağlantısı doğrulanmadı.') }
     if ($LiveState.Model -ne $script:SupportedModel) { [void]$reasons.Add('Cihaz modeli EX520v olarak doğrulanmadı.') }
-    if ($LiveState.RootSsh -and -not (Test-Ex520vFlashLayout $LiveState.MtdNames)) { [void]$reasons.Add('Beklenen MTD bölüm düzeni doğrulanmadı.') }
+    $layoutValid = if ($Action -in @('Backup', 'RamTrial')) {
+        Test-Ex520vFlashLayout $LiveState.MtdNames
+    }
+    else {
+        (Test-Ex520vFlashLayout $LiveState.MtdNames) -or (Test-Ex520vOpenWrtLayout $LiveState.MtdNames)
+    }
+    if ($LiveState.RootSsh -and -not $layoutValid) { [void]$reasons.Add('Beklenen MTD bölüm düzeni doğrulanmadı.') }
     switch ($Action) {
         'Backup' {
             if ($LiveState.System -ne 'Stok') { [void]$reasons.Add('Yedek yalnız stok sistemde alınabilir.') }
-            if ($LiveState.BootIndex -ne '1') { [void]$reasons.Add('Aktif stok slotu ubi1/tp_boot_idx=1 değil.') }
+            if ($LiveState.System -eq 'Stok' -and $LiveState.CommandLine -notmatch '(^|\s)ubi\.mtd=ubi(?:0|1)(\s|$)') { [void]$reasons.Add('Aktif stok UBI slotu doğrulanamadı.') }
         }
         'RamTrial' {
             if ($LiveState.System -ne 'Stok') { [void]$reasons.Add('RAM denemesi yalnız stok sistemden başlatılabilir.') }
@@ -603,9 +646,10 @@ function Test-Ex520vOperationAllowed {
         }
         'Confirm' {
             if ($LiveState.System -ne 'Flash deneme') { [void]$reasons.Add('Kalıcılaştırma yalnız flash deneme sisteminde yapılabilir.') }
-            if ($LiveState.Trial -ne '1') { [void]$reasons.Add('Deneme durumu aktif değil.') }
+            if ($LiveState.Trial -ne '1' -or $LiveState.BootIndex -ne '1') { [void]$reasons.Add('Deneme durumu veya stok geri dönüşü aktif değil.') }
         }
         'ReturnStock' {
+            if ($LiveState.System -eq 'Genişletilmiş OpenWrt') { [void]$reasons.Add('Genişletme stok alanını kullandı; slot tabanlı stoka dönüş artık mümkün değil.') }
             if ($LiveState.System -notin @('RAM deneme', 'Flash deneme', 'Kalıcı OpenWrt')) { [void]$reasons.Add('Slot tabanlı dönüş yalnız çalışan OpenWrt üzerinden yapılabilir.') }
         }
     }
@@ -674,6 +718,29 @@ function Test-Ex520vBackupDirectory {
     return $true
 }
 
+function Get-Ex520vBackupPartitionHash {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$FileName,
+        [Parameter(Mandatory = $true)][long]$ExpectedSize
+    )
+
+    if (-not (Test-Ex520vBackupDirectory -Path $Path)) { throw 'Doğrulanmış tam stok yedeği bulunamadı.' }
+    if ($FileName -notmatch '^mtd[0-9]+-[a-zA-Z0-9_]+\.bin$') { throw 'Geçersiz stok yedek üyesi.' }
+    $file = Join-Path $Path $FileName
+    if (-not (Test-Path -LiteralPath $file -PathType Leaf) -or (Get-Item -LiteralPath $file).Length -ne $ExpectedSize) {
+        throw "$FileName stok yedeğinde yok veya boyutu yanlış."
+    }
+    $hash = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()
+    $expectedLine = "$hash  $FileName"
+    $manifestLines = @(Get-Content -LiteralPath (Join-Path $Path 'SHA256SUMS') -Encoding UTF8)
+    if (@($manifestLines | Where-Object { $_ -ceq $expectedLine }).Count -ne 1) {
+        throw "$FileName SHA256 kaydı stok yedeğinde doğrulanamadı."
+    }
+    return $hash
+}
+
 function Find-Ex520vBackup {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][string]$DeviceId)
@@ -739,13 +806,15 @@ function Test-Ex520vBackupMatchesIdentity {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][string]$Path,
-        [Parameter(Mandatory = $true)]$Identity
+        [Parameter(Mandatory = $true)]$Identity,
+        [switch]$AllowRecoverySnapshot
     )
 
     if (-not (Test-Ex520vBackupDirectory -Path $Path)) { return $false }
     try {
         $metadata = Get-Content -LiteralPath (Join-Path $Path 'backup.json') -Raw -Encoding UTF8 | ConvertFrom-Json
-        if ($metadata.model -ne $script:SupportedModel -or $metadata.system -ne 'Stok') { return $false }
+        $isRecovery=$AllowRecoverySnapshot -and $metadata.PSObject.Properties['kind'] -and $metadata.kind -eq 'openwrt-recovery'
+        if ($metadata.model -ne $script:SupportedModel -or ($metadata.system -ne 'Stok' -and -not $isRecovery)) { return $false }
 
         $property = $metadata.PSObject.Properties['misc_ro_sha256']
         if ($null -eq $property) { return $false }
@@ -969,49 +1038,82 @@ function Test-Ex520vFirmwareSet {
     }
 }
 
+function Get-Ex520vFirmwareReference {
+    [pscustomobject]@{
+        Repository=$script:ReleaseRepository; Commit=$script:FirmwareCommit
+        ArchiveName=$script:FirmwareArchiveName; ArchiveUrl=$script:FirmwareArchiveUrl
+        InitramfsName=$script:FirmwareInitramfs; InitramfsSha256=$script:FirmwareInitramfsSha256
+        SysupgradeName=$script:FirmwareSysupgrade; SysupgradeSha256=$script:FirmwareSysupgradeSha256
+    }
+}
+
+function Test-Ex520vPinnedFirmware {
+    param([Parameter(Mandatory=$true)]$Firmware)
+    return ($Firmware.Valid -and
+        $Firmware.InitramfsSha256 -ieq $script:FirmwareInitramfsSha256 -and
+        $Firmware.SysupgradeSha256 -ieq $script:FirmwareSysupgradeSha256)
+}
+
 function Get-Ex520vReleaseFirmware {
     [CmdletBinding()]
     param()
 
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    $headers = @{ 'User-Agent' = 'TP-Link-EX520v-OpenWrt-Tool' }
-    $release = Invoke-RestMethod -Headers $headers -Uri "https://api.github.com/repos/$script:ReleaseRepository/releases/latest"
-    if ($release.draft -or $release.prerelease) { throw 'Kararlı GitHub yayını bulunamadı.' }
-    $requiredPatterns = @('tplink_ex520v-initramfs-kernel\.bin$', 'tplink_ex520v-squashfs-sysupgrade\.bin$', '^SHA256SUMS\.ex520v$')
-    $selected = @{}
-    foreach ($pattern in $requiredPatterns) {
-        $asset = @($release.assets | Where-Object { $_.name -match $pattern })
-        if ($asset.Count -ne 1) { throw "Yayında beklenen dosya tekil değil: $pattern" }
-        $selected[$pattern] = $asset[0]
-    }
     $paths = Get-Ex520vPaths
-    $tag = ([string]$release.tag_name -replace '[^A-Za-z0-9._-]', '_')
-    $destination = Join-Path $paths.Files $tag
-    if (-not (Test-Path -LiteralPath $destination)) { [void](New-Item -ItemType Directory -Path $destination -Force) }
-    foreach ($asset in $selected.Values) {
-        $target = Join-Path $destination $asset.name
-        $temporary = $target + '.download'
-        Invoke-WebRequest -UseBasicParsing -Headers $headers -Uri $asset.browser_download_url -OutFile $temporary
-        if ((Get-Item -LiteralPath $temporary).Length -ne [int64]$asset.size) { throw "Eksik indirme: $($asset.name)" }
-        Move-Item -LiteralPath $temporary -Destination $target -Force
-    }
-    $initramfs = (Get-ChildItem -LiteralPath $destination -File | Where-Object Name -match 'tplink_ex520v-initramfs-kernel\.bin$').FullName
-    $sysupgrade = (Get-ChildItem -LiteralPath $destination -File | Where-Object Name -match 'tplink_ex520v-squashfs-sysupgrade\.bin$').FullName
-    $manifest = Join-Path $destination 'SHA256SUMS.ex520v'
-    $validation = Test-Ex520vFirmwareSet -InitramfsPath $initramfs -SysupgradePath $sysupgrade -ManifestPath $manifest
-    if (-not $validation.Valid) { throw ('İndirilen firmware doğrulanamadı: ' + ($validation.Errors -join ' ')) }
-    $attestation = 'gh bulunamadı; uygulanmadı'
-    $gh = Get-Ex520vCommand 'gh.exe'
-    if ($gh) {
-        foreach ($image in @($initramfs, $sysupgrade)) {
-            $verify = Invoke-Ex520vNativeText -FilePath $gh -Arguments @('attestation', 'verify', $image, '-R', $script:ReleaseRepository) -TimeoutSeconds 120
-            if ($verify.ExitCode -ne 0) { throw "GitHub build attestation doğrulanamadı: $(Split-Path -Leaf $image)" }
+    $destination=$paths.Files
+    $temporary=Join-Path $paths.State ('firmware-download-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -ItemType Directory -Path $temporary -Force)
+    try {
+        $archive=Join-Path $temporary $script:FirmwareArchiveName
+        $localArchive=Join-Path $destination $script:FirmwareArchiveName
+        if(Test-Path -LiteralPath $localArchive -PathType Leaf){
+            Copy-Item -LiteralPath $localArchive -Destination $archive
+        } else {
+            $savedProgress=$ProgressPreference
+            try {
+                $ProgressPreference='SilentlyContinue'
+                Invoke-WebRequest -UseBasicParsing -Uri $script:FirmwareArchiveUrl -OutFile $archive
+            } finally { $ProgressPreference=$savedProgress }
         }
-        $attestation = 'gh attestation verify başarılı'
-    }
-    $metadata = [ordered]@{ repository = $script:ReleaseRepository; tag = $release.tag_name; release_id = $release.id; published_at = $release.published_at; downloaded_at = (Get-Date).ToString('o'); attestation = $attestation }
+        if((Get-Item -LiteralPath $archive).Length -lt 1MB){throw 'Firmware ZIP dosyası eksik veya beklenmedik ölçüde küçük.'}
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $zip=[IO.Compression.ZipFile]::OpenRead($archive)
+        try {
+            if($zip.Entries.Count -lt 3){throw 'Firmware ZIP içeriği eksik.'}
+            foreach($entry in $zip.Entries){
+                $entryName=$entry.FullName.Replace('\','/')
+                if($entryName -match '(^/|^[A-Za-z]:|(^|/)\.\.(/|$))'){throw "Firmware ZIP güvenli olmayan yol içeriyor: $entryName"}
+            }
+        } finally { $zip.Dispose() }
+        $expanded=Join-Path $temporary 'expanded'
+        # Do not depend on Microsoft.PowerShell.Archive. Some Windows/PS2EXE
+        # environments can discover Expand-Archive but fail while auto-loading
+        # its module. The ZIP entries were checked above and this destination is
+        # a newly-created per-run temporary directory.
+        [IO.Compression.ZipFile]::ExtractToDirectory($archive,$expanded)
+        $required=@($script:FirmwareInitramfs,$script:FirmwareSysupgrade,'SHA256SUMS.ex520v')
+        $selected=@{}
+        foreach($name in $required){
+            $matches=@(Get-ChildItem -LiteralPath $expanded -File -Recurse | Where-Object Name -eq $name)
+            if($matches.Count -ne 1){throw "Firmware ZIP içinde beklenen dosya tekil değil: $name"}
+            $selected[$name]=$matches[0].FullName
+        }
+        $initramfs=$selected[$script:FirmwareInitramfs]
+        $sysupgrade=$selected[$script:FirmwareSysupgrade]
+        $manifest=$selected['SHA256SUMS.ex520v']
+        $validation=Test-Ex520vFirmwareSet -InitramfsPath $initramfs -SysupgradePath $sysupgrade -ManifestPath $manifest
+        if(-not (Test-Ex520vPinnedFirmware $validation)){throw ('ZIP içindeki wmemcmp firmware doğrulanamadı: ' + ($validation.Errors -join ' '))}
+        foreach($name in $required){Copy-Item -LiteralPath $selected[$name] -Destination (Join-Path $destination $name) -Force}
+        $archiveSha256=(Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+    } finally { Remove-Item -LiteralPath $temporary -Recurse -Force -ErrorAction SilentlyContinue }
+    $initramfs=Join-Path $destination $script:FirmwareInitramfs
+    $sysupgrade=Join-Path $destination $script:FirmwareSysupgrade
+    $manifest=Join-Path $destination 'SHA256SUMS.ex520v'
+    $validation = Test-Ex520vFirmwareSet -InitramfsPath $initramfs -SysupgradePath $sysupgrade -ManifestPath $manifest
+    if (-not (Test-Ex520vPinnedFirmware $validation)) { throw 'Yerleştirilen wmemcmp firmware tekrar doğrulanamadı.' }
+    $metadata = [ordered]@{ repository=$script:ReleaseRepository; commit=$script:FirmwareCommit; archive_url=$script:FirmwareArchiveUrl; archive_sha256=$archiveSha256; downloaded_at=(Get-Date).ToString('o'); verification='pinned image SHA256 + FIT + sysupgrade contents' }
     [IO.File]::WriteAllText((Join-Path $destination 'release.json'), (($metadata | ConvertTo-Json) + "`n"), $script:Utf8NoBom)
-    Write-Ex520vLog -Level INFO -Message "Firmware indirildi ve SHA256 doğrulandı: $($release.tag_name)"
+    Write-Ex520vLog -Level INFO -Message "Firmware ZIP indirildi/açıldı ve sabit imaj SHA256 değerleriyle doğrulandı: $script:FirmwareCommit"
     return $validation
 }
 
@@ -1019,13 +1121,14 @@ function Get-Ex520vLocalFirmware {
     [CmdletBinding()]
     param()
     $paths = Get-Ex520vPaths
-    foreach ($directory in @(Get-ChildItem -LiteralPath $paths.Files -Directory -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending)) {
+    $directories=@((Get-Item -LiteralPath $paths.Files)) + @(Get-ChildItem -LiteralPath $paths.Files -Directory -Recurse -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending)
+    foreach ($directory in $directories) {
         $init = Get-ChildItem -LiteralPath $directory.FullName -File | Where-Object Name -match 'tplink_ex520v-initramfs-kernel\.bin$' | Select-Object -First 1
         $sys = Get-ChildItem -LiteralPath $directory.FullName -File | Where-Object Name -match 'tplink_ex520v-squashfs-sysupgrade\.bin$' | Select-Object -First 1
         $manifest = @('SHA256SUMS.ex520v', 'sha256sums') | ForEach-Object { Join-Path $directory.FullName $_ } | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
         if ($init -and $sys -and $manifest) {
             $result = Test-Ex520vFirmwareSet -InitramfsPath $init.FullName -SysupgradePath $sys.FullName -ManifestPath $manifest
-            if ($result.Valid) { return $result }
+            if (Test-Ex520vPinnedFirmware $result) { return $result }
         }
     }
     return $null
@@ -1055,6 +1158,141 @@ function New-Ex520vTrialPayload {
     }
     [IO.File]::WriteAllText((Join-Path $work 'crc.txt'), (($lines -join "`n") + "`n"), $script:Utf8NoBom)
     return $work
+}
+
+function Test-Ex520vSecondaryStockSlot {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]$LiveState,
+        [Parameter(Mandatory = $true)][string]$BackupPath
+    )
+
+    if ($LiveState.System -ne 'Stok' -or -not $LiveState.RootSsh -or $LiveState.CommandLine -notmatch '(^|\s)ubi\.mtd=ubi0(\s|$)') {
+        throw 'İkincil stok slotu hazırlığı yalnız ubi0 üzerinden çalışan doğrulanmış stok sistemde yapılabilir.'
+    }
+    if (-not (Test-Ex520vBackupForLiveState -Path $BackupPath -LiveState $LiveState)) {
+        throw 'İkincil stok slotu hazırlığı için yedek canlı cihazla eşleşmiyor.'
+    }
+
+    $slotFiles = @(Get-ChildItem -LiteralPath $BackupPath -File -Filter 'mtd*-ubi1.bin')
+    if ($slotFiles.Count -ne 1 -or $slotFiles[0].Length -ne 40MB) {
+        throw 'Doğrulanmış yedekte tek bir 40 MiB ubi1 stok slotu bulunamadı.'
+    }
+    $mtdText = Invoke-Ex520vSsh -Profile $LiveState.Profile -DeviceIp $LiveState.DeviceIp -RemoteCommand 'cat /proc/mtd'
+    $slotMatches = @()
+    foreach ($line in ($mtdText -split '\r?\n')) {
+        if ($line -match '^(mtd[0-9]+):\s+([0-9a-fA-F]+)\s+[0-9a-fA-F]+\s+"ubi1"\s*$') {
+            $slotMatches += [pscustomobject]@{ Device = $Matches[1]; Size = [Convert]::ToInt64($Matches[2], 16) }
+        }
+    }
+    if ($slotMatches.Count -ne 1 -or $slotMatches[0].Size -ne 40MB) {
+        throw 'Canlı cihazda tek bir 40 MiB ubi1 stok slotu bulunamadı.'
+    }
+
+    $temporary = [IO.Path]::GetTempFileName()
+    try {
+        Invoke-Ex520vSshToFile -Profile $LiveState.Profile -DeviceIp $LiveState.DeviceIp -RemoteCommand ('cat /dev/' + $slotMatches[0].Device) -OutputPath $temporary -TimeoutSeconds 300
+        if ((Get-Item -LiteralPath $temporary).Length -ne $slotFiles[0].Length) {
+            throw 'Canlı ubi1 okumasının boyutu doğrulanmış yedekle eşleşmiyor.'
+        }
+        $liveHash = (Get-FileHash -LiteralPath $temporary -Algorithm SHA256).Hash
+        $backupHash = (Get-FileHash -LiteralPath $slotFiles[0].FullName -Algorithm SHA256).Hash
+        if ($liveHash -ne $backupHash) {
+            throw 'Canlı ubi1 içeriğinin SHA256 değeri doğrulanmış stok yedeğiyle eşleşmiyor.'
+        }
+    }
+    finally {
+        Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+    }
+
+    $expectedCrc = Get-UbiCrc32 -Path $slotFiles[0].FullName
+    $scriptPath = Join-Path (Get-Ex520vPaths).Install 'stock-select-secondary.sh'
+    Send-Ex520vFile -Profile $LiveState.Profile -DeviceIp $LiveState.DeviceIp -LocalPath $scriptPath -RemotePath '/tmp/stock-select-secondary.sh'
+    $check = Invoke-Ex520vSsh -Profile $LiveState.Profile -DeviceIp $LiveState.DeviceIp -RemoteCommand ("chmod 700 /tmp/stock-select-secondary.sh && /tmp/stock-select-secondary.sh --check " + $expectedCrc) -TimeoutSeconds 300
+    if ($check -notmatch 'CHECK OK') { throw 'İkincil stok slotunun yazmasız ön kontrolü başarılı olmadı.' }
+    Write-Ex520vLog -Level INFO -Message 'Stok ubi1 slotu aynı cihaz yedeğiyle SHA256 ve cihaz üzerinde UBI CRC32 kullanılarak doğrulandı.'
+    return [pscustomobject]@{
+        Ready = $true
+        BackupPath = $BackupPath
+        ExpectedCrc = $expectedCrc
+        LiveMtd = $slotMatches[0].Device
+        Sha256 = $backupHash
+        CheckOutput = $check
+    }
+}
+
+function Select-Ex520vSecondaryStockSlot {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]$LiveState,
+        [Parameter(Mandatory = $true)]$Verification
+    )
+
+    if (-not $Verification.Ready -or $Verification.ExpectedCrc -notmatch '^0x[0-9a-f]{8}$') {
+        throw 'İkincil stok slotu doğrulama kaydı geçersiz.'
+    }
+    if ($LiveState.System -ne 'Stok' -or -not $LiveState.RootSsh -or $LiveState.CommandLine -notmatch '(^|\s)ubi\.mtd=ubi0(\s|$)') {
+        throw 'Cihaz durumu değişti; stok ubi1 seçimi iptal edildi.'
+    }
+    if (-not (Test-Ex520vBackupForLiveState -Path $Verification.BackupPath -LiveState $LiveState)) {
+        throw 'Cihaz kimliği değişti; stok ubi1 seçimi iptal edildi.'
+    }
+    $output = Invoke-Ex520vSsh -Profile $LiveState.Profile -DeviceIp $LiveState.DeviceIp -RemoteCommand ('/tmp/stock-select-secondary.sh --execute ' + $Verification.ExpectedCrc) -TimeoutSeconds 300
+    if ($output -notmatch 'DONE: verified secondary stock slot selected') {
+        throw 'İkincil stok slotunun boot ayarı doğrulanamadı.'
+    }
+    Write-Ex520vOperationRecord -Action 'SecondaryStockSelected' -LiveState $LiveState -Result 'verified'
+    return $output
+}
+
+function Arm-Ex520vRamTrialFallback {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)]$LiveState)
+
+    if ($LiveState.System -ne 'OpenWrt RAM' -or -not $LiveState.RootSsh -or $LiveState.BoardName -ne 'tplink,ex520v' -or $LiveState.RootFs -ne 'tmpfs') {
+        throw 'Stok geri dönüşü yalnız doğrulanmış EX520v initramfs ortamında etkinleştirilebilir.'
+    }
+    $scriptPath = Join-Path (Get-Ex520vPaths).Install 'openwrt-arm-trial.sh'
+    Send-Ex520vFile -Profile $LiveState.Profile -DeviceIp $LiveState.DeviceIp -LocalPath $scriptPath -RemotePath '/tmp/openwrt-arm-trial.sh'
+    $output = Invoke-Ex520vSsh -Profile $LiveState.Profile -DeviceIp $LiveState.DeviceIp -RemoteCommand 'chmod 700 /tmp/openwrt-arm-trial.sh && /tmp/openwrt-arm-trial.sh' -TimeoutSeconds 120
+    if ($output -notmatch 'DONE: RAM trial verified; stock fallback is armed') {
+        throw 'RAM denemesi için stok geri dönüş boot ayarları doğrulanamadı.'
+    }
+    $verified = Get-Ex520vLiveState -DeviceIp $LiveState.DeviceIp
+    if ($verified.System -ne 'RAM deneme' -or $verified.BootIndex -ne '1' -or $verified.Trial -ne '1' -or $verified.TrialMarker -ne 'armed') {
+        throw 'Stok geri dönüş ayarları yazıldıktan sonra canlı RAM denemesi doğrulanamadı.'
+    }
+    Write-Ex520vOperationRecord -Action 'RamTrialFallbackArmed' -LiveState $verified -Result 'verified'
+    return $verified
+}
+
+function Arm-Ex520vFlashTrialFallback {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)]$LiveState, [string]$BackupPath)
+
+    if ($LiveState.System -ne 'Flash deneme' -or -not $LiveState.RootSsh -or $LiveState.Trial -ne '1') {
+        throw 'Stok geri dönüşü yalnız doğrulanmış EX520v flash deneme ortamında etkinleştirilebilir.'
+    }
+    $scriptPath = Join-Path (Get-Ex520vPaths).Install 'openwrt-arm-flash-trial.sh'
+    Send-Ex520vFile -Profile $LiveState.Profile -DeviceIp $LiveState.DeviceIp -LocalPath $scriptPath -RemotePath '/tmp/openwrt-arm-flash-trial.sh'
+    $arguments = ''
+    if ($LiveState.MtdNames -contains 'ubi' -and $LiveState.MtdNames -notcontains 'ubi1') {
+        if (-not $BackupPath -or -not (Test-Ex520vBackupForLiveState -Path $BackupPath -LiveState $LiveState)) {
+            throw 'Birleşik NAND haritasında stok fallback için bu cihaza ait doğrulanmış tam yedek gerekiyor.'
+        }
+        $stockHash = Get-Ex520vBackupPartitionHash -Path $BackupPath -FileName 'mtd6-ubi1.bin' -ExpectedSize 41943040
+        $arguments = ' --expected-merged-ubi1 ' + $stockHash
+    }
+    $output = Invoke-Ex520vSsh -Profile $LiveState.Profile -DeviceIp $LiveState.DeviceIp -RemoteCommand ('chmod 700 /tmp/openwrt-arm-flash-trial.sh && /tmp/openwrt-arm-flash-trial.sh' + $arguments) -TimeoutSeconds 180
+    if ($output -notmatch 'DONE: flash trial verified; stock fallback is armed') {
+        throw 'Flash denemesi için stok geri dönüş boot ayarları doğrulanamadı.'
+    }
+    $verified = Get-Ex520vLiveState -DeviceIp $LiveState.DeviceIp
+    if ($verified.System -ne 'Flash deneme' -or $verified.BootIndex -ne '1' -or $verified.Trial -ne '1') {
+        throw 'Stok geri dönüş ayarı sonrasında canlı flash denemesi doğrulanamadı.'
+    }
+    Write-Ex520vOperationRecord -Action 'FlashTrialFallbackArmed' -LiveState $verified -Result 'verified'
+    return $verified
 }
 
 function Install-Ex520vRamTrial {
@@ -1121,15 +1359,23 @@ function Confirm-Ex520vOpenWrt {
 
 function Return-Ex520vToStock {
     [CmdletBinding()]
-    param([Parameter(Mandatory = $true)]$LiveState, [switch]$Execute)
+    param([Parameter(Mandatory = $true)]$LiveState, [string]$BackupPath, [switch]$Execute)
     $gate = Test-Ex520vOperationAllowed -Action ReturnStock -LiveState $LiveState
     if (-not $gate.Allowed) { throw ($gate.Reasons -join ' ') }
     $scriptPath = Join-Path (Get-Ex520vPaths).Install 'openwrt-return-stock.sh'
     Send-Ex520vFile -Profile $LiveState.Profile -DeviceIp $LiveState.DeviceIp -LocalPath $scriptPath -RemotePath '/tmp/openwrt-return-stock.sh'
-    $check = Invoke-Ex520vSsh -Profile $LiveState.Profile -DeviceIp $LiveState.DeviceIp -RemoteCommand 'chmod 700 /tmp/openwrt-return-stock.sh && /tmp/openwrt-return-stock.sh --check' -TimeoutSeconds 120
+    $arguments = ''
+    if ($LiveState.MtdNames -contains 'ubi' -and $LiveState.MtdNames -notcontains 'ubi1') {
+        if (-not $BackupPath -or -not (Test-Ex520vBackupForLiveState -Path $BackupPath -LiveState $LiveState)) {
+            throw 'Birleşik NAND haritasında stok dönüşü için bu cihaza ait doğrulanmış tam yedek gerekiyor.'
+        }
+        $stockHash = Get-Ex520vBackupPartitionHash -Path $BackupPath -FileName 'mtd6-ubi1.bin' -ExpectedSize 41943040
+        $arguments = ' --expected-merged-ubi1 ' + $stockHash
+    }
+    $check = Invoke-Ex520vSsh -Profile $LiveState.Profile -DeviceIp $LiveState.DeviceIp -RemoteCommand ('chmod 700 /tmp/openwrt-return-stock.sh && /tmp/openwrt-return-stock.sh --check' + $arguments) -TimeoutSeconds 180
     if ($check -notmatch 'CHECK OK') { throw 'Stok slotu doğrulanamadı.' }
     if (-not $Execute) { return [pscustomobject]@{ Ready = $true; CheckOutput = $check } }
-    $output = Invoke-Ex520vSsh -Profile $LiveState.Profile -DeviceIp $LiveState.DeviceIp -RemoteCommand '/tmp/openwrt-return-stock.sh' -TimeoutSeconds 120
+    $output = Invoke-Ex520vSsh -Profile $LiveState.Profile -DeviceIp $LiveState.DeviceIp -RemoteCommand ('/tmp/openwrt-return-stock.sh' + $arguments) -TimeoutSeconds 180
     if (-not (Test-Ex520vRemoteCompletion -Action ReturnStock -ExitCode 0 -Output $output)) { throw 'Stok dönüş boot ayarları doğrulanamadı.' }
     Write-Ex520vOperationRecord -Action 'ReturnStockArmed' -LiveState $LiveState -Result 'verified'
     return $output
@@ -1150,6 +1396,7 @@ function Wait-Ex520vDeviceState {
     param(
         [Parameter(Mandatory = $true)][string]$DeviceIp,
         [Parameter(Mandatory = $true)][string[]]$ExpectedSystems,
+        [string]$CommandLinePattern,
         [int]$TimeoutSeconds = 300
     )
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
@@ -1158,7 +1405,7 @@ function Wait-Ex520vDeviceState {
         Start-Sleep -Seconds 5
         try {
             $last = Get-Ex520vLiveState -DeviceIp $DeviceIp
-            if ($last.System -in $ExpectedSystems) { return $last }
+            if ($last.System -in $ExpectedSystems -and (-not $CommandLinePattern -or $last.CommandLine -match $CommandLinePattern)) { return $last }
         }
         catch {}
     }
@@ -1182,7 +1429,7 @@ function Test-Ex520vLocalRequirements {
         $found = Get-Ex520vCommand $name
         $items += [pscustomobject]@{ Name = $name; Ok = ($null -ne $found); Detail = if ($found) { $found } else { 'Bulunamadı' } }
     }
-    foreach ($name in @('stock-install-trial.sh', 'openwrt-trial-to-flash.sh', 'openwrt-confirm.sh', 'openwrt-return-stock.sh')) {
+    foreach ($name in @('stock-select-secondary.sh', 'stock-install-trial.sh', 'openwrt-arm-trial.sh', 'openwrt-arm-flash-trial.sh', 'openwrt-trial-to-flash.sh', 'openwrt-confirm.sh', 'openwrt-return-stock.sh', 'openwrt-restore-stock-expanded.sh')) {
         $file = Join-Path $paths.Install $name
         $items += [pscustomobject]@{ Name = $name; Ok = (Test-Path -LiteralPath $file -PathType Leaf); Detail = $file }
     }
@@ -1209,7 +1456,17 @@ function Start-Ex520vRootTool {
     finally { $env:EX520_HOST = $oldHost }
 }
 
+. (Join-Path $PSScriptRoot 'Ex520v.Storage.ps1')
+
 Export-ModuleMember -Function @(
+    'Get-Ex520vExpansionReference', 'Get-Ex520vStorageReport', 'Get-Ex520vExpansionPlan',
+    'Get-Ex520vExpansionFirmware', 'Install-Ex520vExpandedStorage', 'Wait-Ex520vExpandedStorage',
+    'Reset-Ex520vOpenWrtKnownHost',
+    'Save-Ex520vRecoverySnapshot', 'Repair-Ex520vPersistentOverlay',
+    'Start-Ex520vSshStorageExpansion',
+    'Find-Ex520vStockRestoreBackup', 'Start-Ex520vStockRestoreFromBackup',
+    'Restore-Ex520vExpansionSettings',
+    'Get-Ex520vPendingStorageSession',
     'Get-Ex520vPaths', 'Initialize-Ex520vTool', 'Write-Ex520vLog', 'Test-Ex520vIPv4', 'Test-TcpPort',
     'Get-Ex520vRootProfiles', 'Get-Ex520vOpenWrtProfile', 'Test-Ex520vSshProfile', 'Invoke-Ex520vSsh',
     'Resolve-Ex520vSystemState', 'Get-Ex520vLiveState', 'Test-Ex520vFlashLayout', 'Test-Ex520vRootCompatibility',
@@ -1217,7 +1474,9 @@ Export-ModuleMember -Function @(
     'Get-Ex520vDeviceId', 'Test-Ex520vBackupDirectory', 'Find-Ex520vBackup', 'Save-Ex520vStockBackup',
     'Get-Ex520vLiveMiscRoSha256', 'Find-Ex520vBackupForLiveState', 'Test-Ex520vBackupForLiveState',
     'Get-UbiCrc32', 'Test-Ex520vFirmwareSet', 'Get-Ex520vReleaseFirmware', 'Get-Ex520vLocalFirmware',
-    'New-Ex520vTrialPayload', 'Install-Ex520vRamTrial', 'Start-Ex520vRamTrialWrite', 'Install-Ex520vFlashTrial',
+    'New-Ex520vTrialPayload', 'Test-Ex520vSecondaryStockSlot', 'Select-Ex520vSecondaryStockSlot',
+    'Arm-Ex520vRamTrialFallback', 'Arm-Ex520vFlashTrialFallback',
+    'Install-Ex520vRamTrial', 'Start-Ex520vRamTrialWrite', 'Install-Ex520vFlashTrial',
     'Confirm-Ex520vOpenWrt', 'Return-Ex520vToStock', 'Restart-Ex520vDevice', 'Wait-Ex520vDeviceState',
     'Test-Ex520vLocalRequirements', 'Start-Ex520vRootTool', 'Invoke-Ex520vNativeText', 'Invoke-Ex520vNativeToFile'
 )

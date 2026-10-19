@@ -36,6 +36,16 @@ class FirmwareProfileTests(unittest.TestCase):
         self.assertNotIn(b"__ENABLE_PANEL_ROOT__", hook)
         self.assertNotIn(b"\r", hook)
 
+    def test_supported_legacy_firmware_versions_use_safe_profile(self):
+        self.assertEqual(
+            MODULE.SUPPORTED_FIRMWARE_PROFILES["EX520v-v1.0_250522"],
+            "legacy-core",
+        )
+        self.assertEqual(
+            MODULE.SUPPORTED_FIRMWARE_PROFILES["EX520v-v1.0_250120"],
+            "legacy-core",
+        )
+
     def test_full_bundle_keeps_web_helper_and_enables_panel_patch(self):
         bundle = MODULE.build_bundle("192.0.2.10", profile="full")
         hook = bundle.assets["persistent-local-root.sh"]
